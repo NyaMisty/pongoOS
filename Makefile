@@ -90,7 +90,8 @@ CHECKRA1N_CC            ?= $(EMBEDDED_CC)
 all: $(BUILD)/PongoConsolidated.bin | $(BUILD)
 
 $(BUILD)/PongoConsolidated.bin: $(BUILD)/Pongo.bin $(BUILD)/checkra1n-kpf-pongo | $(BUILD)
-	bash -c "echo 6175746F626F6F740000200000000000 | xxd -ps -r | cat $(BUILD)/Pongo.bin <(dd if=/dev/zero bs=1 count="$$(((8 - ($$($(STAT) $(BUILD)/Pongo.bin) % 8)) % 8))") /dev/stdin $(BUILD)/checkra1n-kpf-pongo > $@"
+	#bash -c "echo 6175746F626F6F740000200000000000 | xxd -ps -r | cat $(BUILD)/Pongo.bin <(dd if=/dev/zero bs=1 count="$$(((8 - ($$($(STAT) $(BUILD)/Pongo.bin) % 8)) % 8))") /dev/stdin $(BUILD)/checkra1n-kpf-pongo > $@"
+	python consolidate.py $(BUILD)/PongoConsolidated.bin $(BUILD)/Pongo.bin $(BUILD)/checkra1n-kpf-pongo "" 0
 
 $(BUILD)/Pongo.bin: $(BUILD)/vmacho $(BUILD)/Pongo | $(BUILD)
 	$(BUILD)/vmacho -f $(BUILD)/Pongo $@

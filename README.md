@@ -34,6 +34,24 @@ The Makefile will create four binaries in `build/`:
 - `checkra1n-kpf-pongo` - The checkra1n kernel patchfinder, as a Pongo module (Mach-O/kext)
 - `PongoConsolidated.bin` - PongoOS and the KPF merged into a single binary
 
+## Add your own module
+
+This fork support to consolidate multiple module into the binary.
+
+You can use the following command to generate it, the modules would load from modn to mod1 (reversed)
+
+```
+python2 consolidate.py [output-path] [Pongo.bin path] [mod1 path] [mod1 command] [mod1 wait time] ... [modn path] [mod1 command] [mod1 wait time]
+```
+
+Note: 
+1. you should also consolidate kpf, or your binary won't autoboot. 
+2. because the kpf needs to receive bootstrap ramdisk (which is sent by checkra1n immediately after pongoOS), the kpf must be the last module, so that the remaining loader_xfer_data would be preserved for kpf
+3. maximum command length are 23 chars
+4. module are loaded from the last one to the first one (that's because kpf needs to setup hook first)
+
+Example: `python consolidate.py build/PongoConsolidated_new.bin build/Pongo.bin ../xnuspy/module/xnuspy_consolidated "xnuspy-prep" 5000000 build/checkra1n-kpf-pongo "" 0`
+
 ## Usage
 
     checkra1n -k Pongo.bin                  # Boots to Pongo shell, KPF not available
