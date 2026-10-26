@@ -25,12 +25,7 @@ jobs:
           echo "--- ld64 --version"; /usr/bin/ld64 -v 2>&1 | head -2 || true
           echo "--- ldd ld64"; ldd /usr/bin/ld64 2>&1 | head -8 || true
           echo "--- python dlopen test"
-          python3 -c "import ctypes;
-import glob
-for p in ['/usr/lib/llvm-9/lib/libLTO.so','/usr/lib/llvm-10/lib/libLTO.so']:
-    try:
-        ctypes.CDLL(p); print('OK', p)
-    except OSError as e: print('FAIL', p, e)"
+          python3 -c "import ctypes; [print('OK',p) if ctypes.CDLL(p) else None for p in []]" 2>/dev/null; for L in /usr/lib/llvm-9/lib/libLTO.so /usr/lib/llvm-10/lib/libLTO.so; do python3 -c "import ctypes,sys; ctypes.CDLL(sys.argv[1]); print('OK', sys.argv[1])" "$L" || echo "FAIL $L"; done
           echo "--- go"
           EMBEDDED_CC=clang-10 EMBEDDED_AR=llvm-ar-10 EMBEDDED_RANLIB=llvm-ranlib-10 make all
       - name: Archive
