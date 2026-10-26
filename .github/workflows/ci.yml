@@ -21,6 +21,14 @@ jobs:
         shell: bash
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          ls -la /usr/lib/llvm-9/lib/libLTO* /usr/lib/llvm/libLTO* 2>&1 || true
+          apt-get install -qy strace >/dev/null 2>&1 || sudo apt-get install -qy strace >/dev/null
+          make newlib >/dev/null 2>&1 || true
+          strace -f -e trace=openat,access,statx -o /tmp/st.log clang-9 -o /tmp/t.o -c src/boot/stage3.c --target=arm64-apple-ios12.0 -std=gnu17 -O3 -flto -ffreestanding -U__nonnull -nostdlibinc -Inewlib/aarch64-none-darwin/include 2>&1 | tail -3
+          clang-9 -c src/boot/stage3.c -o /tmp/stage3x.o --target=arm64-apple-ios12.0 -std=gnu17 -O3 -flto -ffreestanding -U__nonnull -nostdlibinc -Inewlib/aarch64-none-darwin/include
+          strace -f -e trace=openat -o /tmp/ld.log clang-9 -o /tmp/x -fuse-ld=/usr/bin/ld64 -nostdlib -static /tmp/stage3x.o --target=arm64-apple-ios12.0 -Wl,-e,start 2>&1 | tail -3 || true
+          echo "=== ld64 openat on libLTO ==="; grep -iE "lto" /tmp/ld.log | head -10 || echo "(no lto opens)"
+          echo "=== END ==="
           EMBEDDED_CC=clang-9 EMBEDDED_AR=llvm-ar-9 EMBEDDED_RANLIB=llvm-ranlib-9 make all
       - name: Archive
         uses: actions/upload-artifact@v4
