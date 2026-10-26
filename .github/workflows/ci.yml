@@ -10,7 +10,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     steps:
       - name: Install toolchain
         run: |
@@ -18,6 +18,10 @@ jobs:
           sudo apt-key adv --fetch-keys https://assets.checkra.in/debian/archive.key
           sudo apt-get update
           sudo apt-get install -y ld64 cctools-strip
+          wget -q https://apt.llvm.org/llvm.sh && chmod +x llvm.sh && sudo ./llvm.sh 14
+          sudo ln -sf /usr/bin/clang-14 /usr/local/bin/clang-10
+          sudo ln -sf /usr/bin/llvm-ar-14 /usr/local/bin/llvm-ar-10
+          sudo ln -sf /usr/bin/llvm-ranlib-14 /usr/local/bin/llvm-ranlib-10
       - name: Voodoo magic
         id: voodoo
         uses: actions/cache@v2

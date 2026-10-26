@@ -910,8 +910,9 @@ struct sep_command {
     void (*cb)(const char* cmd, char* args);
 };
 
-void sep_help();
+void sep_help(const char* cmd, char* args);
 #define SEP_COMMAND(_name, _desc, _cb) {.name = _name, .desc = _desc, .cb = _cb}
+void sep_pwned_peek(const char* cmd, char* args);
 void sep_pwned_peek(const char* cmd, char* args) {
     if(!sep_is_pwned) {
         iprintf("sep is not pwned!\n");
@@ -1170,9 +1171,16 @@ void sep_cmd(const char* cmd, char* args) {
     }
 }
 
+extern void sep_bd_sepfw_hook(void* sepfw_bytes, size_t sepfw_size);
+
 void sep_setup() {
     gSEPDev = dt_find(gDeviceTree, "/device-tree/arm-io/sep");
     if(!gSEPDev) panic("sep_setup: no device!");
+
+    // scheme C: patch the sepi as reload_sepi hands it to the SEP. pongo's
+    // custom entry runs no crt, so constructors never execute; this is the
+    // always-taken registration point.
+    sepfw_kpf_hook = sep_bd_sepfw_hook;
 
     uint32_t len = 0;
     uint32_t *xnu_wants_booted = dt_prop(gSEPDev, "sepfw-booted", &len);
