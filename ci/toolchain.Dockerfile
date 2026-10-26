@@ -22,6 +22,8 @@ RUN apt-get update -q \
        ld64 cctools-strip \
     && rm -rf /var/lib/apt/lists/* \
     && ln -sf /usr/bin/clang-10 /usr/local/bin/clang-10 \
+    && ln -sfn /usr/lib/llvm-10 /usr/lib/llvm \
+    && ldconfig \
     && git config --global --add safe.directory '*'
 
 # Default to bash for RUN steps
