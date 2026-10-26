@@ -21,12 +21,12 @@ jobs:
         shell: bash
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          echo "--- which ld64"; ls -la /usr/bin/ld64; dpkg -S /usr/bin/ld64 || true
-          echo "--- ld64 --version"; /usr/bin/ld64 -v 2>&1 | head -2 || true
-          echo "--- ldd ld64"; ldd /usr/bin/ld64 2>&1 | head -8 || true
-          echo "--- python dlopen test"
-          python3 -c "import ctypes; [print('OK',p) if ctypes.CDLL(p) else None for p in []]" 2>/dev/null; for L in /usr/lib/llvm-9/lib/libLTO.so /usr/lib/llvm-10/lib/libLTO.so; do python3 -c "import ctypes,sys; ctypes.CDLL(sys.argv[1]); print('OK', sys.argv[1])" "$L" || echo "FAIL $L"; done
-          echo "--- go"
+          echo "--- single-object straced link"
+          clang-10 -c src/boot/stage3.c -o /tmp/s.o --target=arm64-apple-ios12.0 -std=gnu17 -O3 -flto -ffreestanding -U__nonnull -nostdlibinc -Inewlib/aarch64-none-darwin/include
+          strace -f -e trace=openat,access -o /tmp/tr.log /usr/bin/ld64 -arch arm64 -o /tmp/out.bin -e _start /tmp/s.o 2>&1 | tail -5 || true
+          echo "--- lto-relevant syscalls:"
+          grep -iE "lto|\.so" /tmp/tr.log | grep -vE "ENOENT \(\?\) ld.so.cache" | tail -25
+          echo "--- dlopen result was: see above"
           EMBEDDED_CC=clang-10 EMBEDDED_AR=llvm-ar-10 EMBEDDED_RANLIB=llvm-ranlib-10 make all
       - name: Archive
         uses: actions/upload-artifact@v4

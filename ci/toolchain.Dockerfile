@@ -11,7 +11,7 @@ ENV LD_LIBRARY_PATH=/usr/lib/llvm-9/lib
 
 RUN apt-get update -q \
     && apt-get install -qy --no-install-recommends \
-       wget gnupg make git ca-certificates nodejs sudo build-essential \
+       wget gnupg make git ca-certificates nodejs sudo build-essential strace file \
     && echo 'deb https://assets.checkra.in/debian /' > /etc/apt/sources.list.d/checkra1n.list \
     && wget -qO- https://assets.checkra.in/debian/archive.key | apt-key add - \
     && wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add - \
