@@ -35,7 +35,7 @@ jobs:
           file: ci/toolchain.Dockerfile
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/pongo-tc:20.04
-            ghcr.io/${{ github.repository_owner }}/pongo-tc:${{ github.event.inputs.tag }}
+            ghcr.io/nyamisty/pongo-tc:20.04
+
           cache-from: type=gha
           cache-to: type=gha,mode=max
