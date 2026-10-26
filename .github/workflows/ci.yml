@@ -8,28 +8,27 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    container: ubuntu:20.04
     steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-      - name: Build in ubuntu:20.04 container (official toolchain: clang-10 + ld64)
+      - name: Install toolchain (official: clang-10 + ld64 on 20.04)
         run: |
-          cat > build_ci.sh <<'SCRIPT'
           set -euxo pipefail
           export DEBIAN_FRONTEND=noninteractive
           apt-get update -q
-          apt-get install -qy wget gnupg make
+          apt-get install -qy wget gnupg make git ca-certificates
           echo 'deb https://assets.checkra.in/debian /' > /etc/apt/sources.list.d/checkra1n.list
           wget -qO- https://assets.checkra.in/debian/archive.key | apt-key add -
           wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add -
           echo 'deb http://apt.llvm.org/focal/ llvm-toolchain-focal-10 main' > /etc/apt/sources.list.d/llvm10.list
           apt-get update -q
           apt-get install -qy clang-10 llvm-10-dev libllvm10 ld64 cctools-strip
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Compile
+        run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           EMBEDDED_CC=clang-10 EMBEDDED_AR=llvm-ar-10 EMBEDDED_RANLIB=llvm-ranlib-10 make all
-          chmod -R a+rwX build
-          SCRIPT
-          docker run --rm -v "$PWD:/work" -w /work -e GITHUB_WORKSPACE=/work ubuntu:20.04 bash build_ci.sh
       - name: Archive
         uses: actions/upload-artifact@v4
         with:
