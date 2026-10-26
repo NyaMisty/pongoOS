@@ -88,6 +88,11 @@ static bool macho_text_segment(const uint8_t *fw, size_t base, size_t end,
     return false;
 }
 
+// Monolithic path (T8010-era A10 production sepi): the whole payload is one
+// flat image loaded at SEP VA 0 — no embedded Mach-O container, so the SKS
+// anchor cannot exist. Fall back to a dead-space scan: the first >=0x400
+// zero run in the back half of the image (after code, in alignment padding).
+// Container path (vresearch/vphone images): locate the SKS app by its source path.
 static size_t find_sks_image(const uint8_t *fw, size_t size)
 {
     size_t p = 0;
@@ -96,17 +101,36 @@ static size_t find_sks_image(const uint8_t *fw, size_t size)
         if (m >= size) break;
         uint64_t vm, foff, fsz;
         if (!macho_text_segment(fw, m, size, &vm, &foff, &fsz, NULL)) { p = m + 0x1000; continue; }
-        // The image's own bytes for its __TEXT: fw + m + foff .. +fsz
         if (m + foff + fsz <= size) {
-            const uint8_t *hay = fw + m + foff;
-            size_t hay_len = (size_t)fsz;
-            // __cstring lives in __TEXT; search for the anchor there.
-            const uint8_t *hit = bd_memmem(hay, hay_len, kSKSAnchor, sizeof(kSKSAnchor) - 1);
-            if (hit) return m;
+            if (bd_memmem(fw + m + foff, (size_t)fsz, kSKSAnchor, sizeof kSKSAnchor - 1))
+                return m;
         }
         p = m + 0x1000;
     }
     return (size_t)-1;
+}
+
+static size_t run_off;
+static bool monolithic_gap(const uint8_t *fw, size_t size,
+                           size_t *gap_off, size_t *gap_len)
+{
+    size_t best_off = 0, best_len = 0;
+    size_t run = 0;
+    size_t start = size / 2;   // only the back half: skip code
+    for (size_t o = start; o + 4 <= size; o += 4) {
+        uint32_t w;
+        memcpy(&w, fw + o, 4);
+        if (w == 0) {
+            if (!run) run_off = o;
+            run += 4;
+        } else {
+            if (run >= 0x400 && run > best_len) { best_off = run_off; best_len = run; }
+            run = 0;
+        }
+    }
+    if (run >= 0x400 && run > best_len) { best_off = run_off; best_len = run; }
+    if (best_len) { *gap_off = best_off; *gap_len = best_len; return true; }
+    return false;
 }
 
 // Free gap in the image between the end of the load commands and the first
@@ -165,13 +189,14 @@ void sep_bd_sepfw_hook(void *sepfw_bytes, size_t sepfw_size)
 {
     uint8_t *fw = (uint8_t *)sepfw_bytes;
     size_t sks = find_sks_image(fw, sepfw_size);
-    if (sks == (size_t)-1) {
-        iprintf("sepbd: SKS image not found, skipping\n");
-        return;
-    }
     size_t gap_off, gap_len;
-    if (!sks_gap(fw, sks, sepfw_size, &gap_off, &gap_len)) {
-        iprintf("sepbd: no dead gap in SKS header, skipping\n");
+    if (sks != (size_t)-1 && sks_gap(fw, sks, sepfw_size, &gap_off, &gap_len)) {
+        // container path: VA computed below from the SKS __TEXT vmaddr
+    } else if (monolithic_gap(fw, sepfw_size, &gap_off, &gap_len)) {
+        iprintf("sepbd: container anchor absent, using monolithic gap\n");
+        sks = 0;                 // marker so the VA calc below uses offset directly
+    } else {
+        iprintf("sepbd: SKS image not found and no monolithic gap, skipping\n");
         return;
     }
 
@@ -201,9 +226,11 @@ void sep_bd_sepfw_hook(void *sepfw_bytes, size_t sepfw_size)
     memcpy(fw + gap_off, code, SEP_BD_BLOB_LEN);
     memcpy(fw + gap_off + SEP_BD_BLOB_LEN, "VPBDv4.1", 8);
 
-    // Runtime VA of the handler = SKS __TEXT vmaddr + gap offset in image.
-    uint64_t handler_va = 0;
-    {
+    // Runtime VA of the handler = SKS __TEXT vmaddr + gap offset in image
+    // (container images); for monolithic images the load base is 0, so the
+    // VA is the file offset itself.
+    uint64_t handler_va = gap_off;
+    if (sks) {
         uint64_t vm2, fo2, fsz2;
         if (macho_text_segment(fw, sks, sks + 0x10000, &vm2, &fo2, &fsz2, NULL))
             handler_va = vm2 + (gap_off - sks);
