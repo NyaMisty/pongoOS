@@ -21,6 +21,14 @@ jobs:
         shell: bash
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          echo "=== libLTO diag ==="
+          ls -la /usr/lib/llvm-10/lib/libLTO* 2>&1 || true
+          ls -la /usr/lib/llvm/libLTO* 2>&1 || true
+          echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
+          which ld64 || true
+          readelf -d "$(which ld64)" 2>/dev/null | grep -i -E "rpath|runpath|NEEDED.*LTO" || true
+          ldd "$(which ld64)" 2>&1 | grep -i lto || true
+          echo "=== end diag ==="
           EMBEDDED_CC=clang-10 EMBEDDED_AR=llvm-ar-10 EMBEDDED_RANLIB=llvm-ranlib-10 make all
       - name: Archive
         uses: actions/upload-artifact@v4
