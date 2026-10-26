@@ -2394,7 +2394,8 @@ static void kpf_find_shellcode_area(xnu_pf_patchset_t *xnu_text_exec_patchset)
     xnu_pf_maskmatch(xnu_text_exec_patchset, "shellcode_area", matches, masks, count, true, (void*)kpf_find_shellcode_area_callback);
 }
 
-static kpf_component_t kpf_shellcode =
+extern kpf_component_t kpf_sepbd_hook;
+kpf_component_t kpf_shellcode =
 {
     .patches =
     {
@@ -2450,6 +2451,7 @@ static void kpf_cmd(void)
         &kpf_launch_constraints,
         &kpf_mach_port,
         &kpf_nvram,
+        &kpf_sepbd_hook,
         &kpf_shellcode,
         &kpf_overlay,
         &kpf_ramdisk,
