@@ -8,9 +8,9 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    container: catthehacker/ubuntu:full-20.04
+    container: "catthehacker/ubuntu:full-20.04"
     steps:
-      - name: Install toolchain (official: clang-10 + ld64 on 20.04)
+      - name: Install toolchain (clang-10 + ld64 on 20.04)
         run: |
           set -euxo pipefail
           export DEBIAN_FRONTEND=noninteractive
