@@ -5,6 +5,9 @@
 FROM ubuntu:20.04
 
 ENV DEBIAN_FRONTEND=noninteractive
+# ld64 (checkra1n apt) loads libLTO dynamically; point it at clang-10's copy
+# (pongoOS issue #166: LD_LIBRARY_PATH=/usr/lib/llvm-N/lib before make).
+ENV LD_LIBRARY_PATH=/usr/lib/llvm-10/lib
 
 RUN apt-get update -q \
     && apt-get install -qy --no-install-recommends \
