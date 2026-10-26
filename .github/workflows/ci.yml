@@ -8,21 +8,12 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    container: "ghcr.io/catthehacker/ubuntu:full-20.04"
+    container:
+          image: ghcr.io/nyamisty/pongo-tc:20.04
+          credentials:
+            username: ${{ github.actor }}
+            password: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - name: Install toolchain (clang-10 + ld64 on 20.04)
-        shell: bash
-        run: |
-          set -euxo pipefail
-          export DEBIAN_FRONTEND=noninteractive
-          sudo apt-get update -q
-          sudo apt-get install -qy wget gnupg make git ca-certificates
-          echo 'deb https://assets.checkra.in/debian /' | sudo tee /etc/apt/sources.list.d/checkra1n.list > /dev/null
-          wget -qO- https://assets.checkra.in/debian/archive.key | sudo apt-key add -
-          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
-          echo 'deb http://apt.llvm.org/focal/ llvm-toolchain-focal-10 main' | sudo tee /etc/apt/sources.list.d/llvm10.list > /dev/null
-          sudo apt-get update -q
-          sudo apt-get install -qy clang-10 llvm-10-dev libllvm10 ld64 cctools-strip
       - uses: actions/checkout@v4
         with:
           submodules: recursive
