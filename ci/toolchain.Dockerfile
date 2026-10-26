@@ -21,7 +21,10 @@ RUN apt-get update -q \
     && apt-get install -qy --no-install-recommends \
        clang-9 llvm-9 llvm-9-dev libllvm9 \
        clang-10 llvm-10-dev libllvm10 \
-       ld64 cctools-strip \
+       cctools-strip \
+    && wget -q https://github.com/Siguza/ld64/releases/download/954.16-0/ld64_954.16-0_amd64.deb -O /tmp/ld64.deb \
+    && apt-get install -qy --no-install-recommends /tmp/ld64.deb \
+    && rm /tmp/ld64.deb \
     && rm -rf /var/lib/apt/lists/* \
     && ln -sf /usr/bin/clang-10 /usr/local/bin/clang-10 \
     && ln -sfn /usr/lib/llvm-9 /usr/lib/llvm \
