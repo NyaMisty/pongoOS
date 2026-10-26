@@ -1,50 +1,35 @@
 name: CI
 
 on:
-  # Trigger on all pushes and pull requests
   push:
   pull_request:
-
-  # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     steps:
-      - name: Install toolchain
-        run: |
-          echo 'deb https://assets.checkra.in/debian /' | sudo tee /etc/apt/sources.list.d/checkra1n.list
-          sudo apt-key adv --fetch-keys https://assets.checkra.in/debian/archive.key
-          sudo apt-get update
-          sudo apt-get install -y ld64 cctools-strip
-          wget -q https://apt.llvm.org/llvm.sh && chmod +x llvm.sh && sudo ./llvm.sh 14
-          sudo ln -sf /usr/bin/clang-14 /usr/local/bin/clang-10
-          sudo ln -sf /usr/bin/llvm-ar-14 /usr/local/bin/llvm-ar-10
-          sudo ln -sf /usr/bin/llvm-ranlib-14 /usr/local/bin/llvm-ranlib-10
-      - name: Voodoo magic
-        id: voodoo
-        uses: actions/cache@v4
+      - uses: actions/checkout@v4
         with:
-          key: ${{ github.event_name }}-${{ github.ref }}-${{ github.run_id }}
-          restore-keys: |
-            push-${{ github.ref }}-
-            push-
-          path: |
-            **
-      - name: Checkout repository
-        if: steps.voodoo.outputs.cache-hit != 'true'
-        uses: actions/checkout@v4
-        with:
-          submodules: true
-      - name: Update repository
-        if: steps.voodoo.outputs.cache-hit == 'true'
+          submodules: recursive
+      - name: Build in ubuntu:20.04 container (official toolchain: clang-10 + ld64)
         run: |
-          git fetch --all
-          git reset --hard origin/$(git branch --show-current)
-          git submodule update --recursive --remote
-      - name: Compile
-        run: EMBEDDED_CC='clang-10' EMBEDDED_AR='llvm-ar-10' EMBEDDED_RANLIB='llvm-ranlib-10' make all
+          cat > build_ci.sh <<'SCRIPT'
+          set -euxo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -q
+          apt-get install -qy wget gnupg make
+          echo 'deb https://assets.checkra.in/debian /' > /etc/apt/sources.list.d/checkra1n.list
+          wget -qO- https://assets.checkra.in/debian/archive.key | apt-key add -
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add -
+          echo 'deb http://apt.llvm.org/focal/ llvm-toolchain-focal-10 main' > /etc/apt/sources.list.d/llvm10.list
+          apt-get update -q
+          apt-get install -qy clang-10 llvm-10-dev libllvm10 ld64 cctools-strip
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          EMBEDDED_CC=clang-10 EMBEDDED_AR=llvm-ar-10 EMBEDDED_RANLIB=llvm-ranlib-10 make all
+          chmod -R a+rwX build
+          SCRIPT
+          docker run --rm -v "$PWD:/work" -w /work -e GITHUB_WORKSPACE=/work ubuntu:20.04 bash build_ci.sh
       - name: Archive
         uses: actions/upload-artifact@v4
         with:
