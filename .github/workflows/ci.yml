@@ -50,6 +50,12 @@ jobs:
           mv build/Pongo.bin upload/Pongo.bin.development
           mv build/checkra1n-kpf-pongo upload/checkra1n-kpf-pongo.development
 
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pongo-build
+          path: upload/
+
       - name: Get branch name
         id: branch-name
         uses: tj-actions/branch-names@v7
