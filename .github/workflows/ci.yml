@@ -28,6 +28,12 @@ jobs:
         run: |
           make
 
+      - name: Check upload credentials
+        id: uploadable
+        run: echo "UPLOAD=$(if [ -n "$NICKCHAN_FTP_HOST" ]; then echo 1; else echo 0; fi)" >> "$GITHUB_ENV"
+        env:
+          NICKCHAN_FTP_HOST: ${{ secrets.NICKCHAN_FTP_HOST }}
+
       - name: Prepare upload directory
         run: |
           mkdir upload
@@ -49,6 +55,7 @@ jobs:
         uses: tj-actions/branch-names@v7
 
       - name: Upload artifact
+        if: env.UPLOAD == '1'
         uses: wangyucode/sftp-upload-action@v3
         with:
           host: ${{ secrets.NICKCHAN_FTP_HOST }}
