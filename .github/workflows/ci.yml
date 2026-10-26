@@ -11,6 +11,7 @@ jobs:
     container: "catthehacker/ubuntu:full-20.04"
     steps:
       - name: Install toolchain (clang-10 + ld64 on 20.04)
+        shell: bash
         run: |
           set -euxo pipefail
           export DEBIAN_FRONTEND=noninteractive
@@ -26,6 +27,7 @@ jobs:
         with:
           submodules: recursive
       - name: Compile
+        shell: bash
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           EMBEDDED_CC=clang-10 EMBEDDED_AR=llvm-ar-10 EMBEDDED_RANLIB=llvm-ranlib-10 make all
