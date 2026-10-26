@@ -26,7 +26,15 @@ jobs:
           strace -f -e trace=openat,access -o /tmp/tr.log /usr/bin/ld64 -arch arm64 -o /tmp/out.bin -e _start /tmp/s.o 2>&1 | tail -5 || true
           echo "--- lto-relevant syscalls:"
           grep -iE "lto|\.so" /tmp/tr.log | grep -vE "ENOENT \(\?\) ld.so.cache" | tail -25
-          echo "--- dlopen result was: see above"
+          echo "--- dlsym probe (lto_module_create etc.)"
+          for L in /usr/lib/llvm-9/lib/libLTO.so /usr/lib/llvm-10/lib/libLTO.so; do
+            python3 -c "
+import ctypes, sys
+lib = ctypes.CDLL(sys.argv[1])
+for s in ['lto_module_create','lto_module_is_object_file_for_target','lto_codegen_create']:
+    print(sys.argv[1].split('/')[-2], s, '->', 'OK' if getattr(lib, s, None) else 'MISSING')
+" "$L"
+          done
           EMBEDDED_CC=clang-10 EMBEDDED_AR=llvm-ar-10 EMBEDDED_RANLIB=llvm-ranlib-10 make all
       - name: Archive
         uses: actions/upload-artifact@v4
