@@ -22,6 +22,10 @@ jobs:
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           echo "=== libLTO diag ==="
+          dpkg -L libllvm10 | grep -i lto || true
+          dpkg -L llvm-10-dev | grep -i lto || true
+          find /usr/lib/llvm-10 -name "*LTO*" -exec ls -la {} \;
+          file /usr/lib/llvm-10/lib/libLTO.so.10
           ls -la /usr/lib/llvm-10/lib/libLTO* 2>&1 || true
           ls -la /usr/lib/llvm/libLTO* 2>&1 || true
           echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
