@@ -27,14 +27,7 @@ jobs:
           echo "--- lto-relevant syscalls:"
           grep -iE "lto|\.so" /tmp/tr.log | grep -vE "ENOENT \(\?\) ld.so.cache" | tail -25
           echo "--- dlsym probe (lto_module_create etc.)"
-          for L in /usr/lib/llvm-9/lib/libLTO.so /usr/lib/llvm-10/lib/libLTO.so; do
-            python3 -c "
-import ctypes, sys
-lib = ctypes.CDLL(sys.argv[1])
-for s in ['lto_module_create','lto_module_is_object_file_for_target','lto_codegen_create']:
-    print(sys.argv[1].split('/')[-2], s, '->', 'OK' if getattr(lib, s, None) else 'MISSING')
-" "$L"
-          done
+          for L in /usr/lib/llvm-9/lib/libLTO.so /usr/lib/llvm-10/lib/libLTO.so; do LD_P="$L" python3 -c "import ctypes,os; lib=ctypes.CDLL(os.environ['LD_P']); syms=['lto_module_create','lto_module_is_object_file_for_target','lto_codegen_create']; print(os.environ['LD_P'], {s: (True if hasattr(lib,s) else False) for s in syms})"; done
           EMBEDDED_CC=clang-10 EMBEDDED_AR=llvm-ar-10 EMBEDDED_RANLIB=llvm-ranlib-10 make all
       - name: Archive
         uses: actions/upload-artifact@v4
