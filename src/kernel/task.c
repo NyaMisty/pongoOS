@@ -25,7 +25,6 @@
  * 
  */
 #include <errno.h>
-#include <stdarg.h>
 #include <stdlib.h>
 #include <pongo.h>
 
