@@ -624,6 +624,115 @@ static void sepbd_mping_cmd(const char *cmd, char *args) {
                     *(volatile uint32_t *)((uintptr_t)g_mb32 + 0x60));
         return;
     }
+    // 'ping' rides the KNOWN-GOOD channel: SEPROM answers opcode 1 with
+    // {ep=0xff, op=101} while it owns the mailbox (before tz0/resume).
+    // Its silence marks the handover boundary; its return means SEPROM
+    // is back in control.
+    if (args && args[0]=='p' && args[1]=='i' && args[2]=='n' && args[3]=='g') {
+        iprintf("sepbd: [seprom-ping] opcode 1 ...\n");
+        sep_send_msg(0xFF, 0x0, 1, 0, 0);
+        for (int i = 0; i < 200; i++) {
+            spin(24000);
+            uint64_t r = sep_fast_check_mailbox();
+            if (r) {
+                iprintf("sepbd: SEPROM ALIVE, reply %016llx after %d ms\n", (unsigned long long)r, i);
+                return;
+            }
+        }
+        iprintf("sepbd: seprom silent (mailbox owned by SEOS or dead)\n");
+        return;
+    }
+    // 'ping' = SEPROM's known-good channel: opcode 1 -> {ep=0xff, op=101}
+    // while SEPROM owns the mailbox (before tz0/resume). Silence marks the
+    // handover boundary or a dead SEP.
+    // 'boot' = SEOS's known-good channel: SEOS announces itself on
+    // {ep=0, opcode=0xd} (pongo's sep_handle_ctrl_msg_from_sep prints
+    // "SEPOS booted!" for exactly this frame) — unsolicited, so this just
+    // waits for it and reports who currently owns the mailbox.
+    if (args && args[0]=='p' && args[1]=='i' && args[2]=='n' && args[3]=='g') {
+        iprintf("sepbd: [seprom-ping] opcode 1 ...\n");
+        sep_send_msg(0xFF, 0x0, 1, 0, 0);
+        for (int i = 0; i < 200; i++) {
+            spin(24000);
+            uint64_t r = sep_fast_check_mailbox();
+            if (r) {
+                iprintf("sepbd: SEPROM ALIVE, reply %016llx after %d ms\n", (unsigned long long)r, i);
+                return;
+            }
+        }
+        iprintf("sepbd: seprom silent (mailbox owned by SEOS or dead)\n");
+        return;
+    }
+    if (args && args[0]=='b' && args[1]=='o' && args[2]=='o' && args[3]=='t') {
+        iprintf("sepbd: [seos-wait] listening for {ep=0, op=0xd} boot announce...\n");
+        for (int i = 0; i < 600; i++) {  // 6s
+            spin(24000);
+            uint64_t r = sep_fast_check_mailbox();
+            if (r) {
+                union sepbd_msg_u rm = {.val = r};
+                iprintf("sepbd: SEOS frame after %d ms: ep=%x op=%x data=%x%s\n",
+                        i, rm.msg.ep, rm.msg.opcode, rm.msg.data,
+                        (rm.msg.ep == 0 && rm.msg.opcode == 0xd) ? "  << SEOS BOOTED" : "");
+                return;
+            }
+        }
+        iprintf("sepbd: no SEOS frame in 6000 ms (not booted / not announcing)\n");
+        return;
+    }
+    // 'probe4': the polling endpoint (j71s endpoint table item 0,
+    // {flag=0, ep=4}) is the one endpoint designed for AP-initiated
+    // request/response without interrupts. Fire a battery of XNU-style
+    // query variants at it and report the first answer.
+    if (args && args[0]=='p' && args[1]=='r' && args[2]=='o' && args[3]=='b' && args[4]=='e' && args[5]=='4') {
+        static const struct { uint8_t tag, op; uint32_t data; } variants[] = {
+            {0x01, 0x01, 0},        // XNU-style QUERY capability
+            {0x00, 0x01, 0},        // op only
+            {0x01, 0x00, 0},        // tag only
+            {0x42, 0x01, 0},
+            {0x00, 0x17, 0},        // 0x17 = XNU sep msg type observed
+            {0x00, 0x06, 0x1234},   // misc
+        };
+        for (unsigned v = 0; v < sizeof variants / sizeof variants[0]; v++) {
+            iprintf("sepbd: [probe4] try tag=%x op=%x data=%x ...\n",
+                    variants[v].tag, variants[v].op, variants[v].data);
+            sep_send_msg(0x04, variants[v].tag, variants[v].op, 0, variants[v].data);
+            for (int i = 0; i < 100; i++) {   // 1s per variant
+                spin(24000);
+                uint64_t r = sep_fast_check_mailbox();
+                if (r) {
+                    union sepbd_msg_u rm = {.val = r};
+                    iprintf("sepbd: REPLY: ep=%x tag=%x op=%x param=%x data=%x\n",
+                            rm.msg.ep, rm.msg.tag, rm.msg.opcode, rm.msg.param, rm.msg.data);
+                    return;
+                }
+            }
+        }
+        iprintf("sepbd: probe4: no answer to any variant\n");
+        return;
+    }
+    if (args && args[0]=='e' && args[1]=='v') {
+        // listen for ROM-phase lifecycle frames: {ep=0xff, op=0xd2} startup
+        // events (phase 1/2, sent by the loader before/around fwload) and
+        // the SEOS {ep=0, op=0xd} boot announce. Any of these proves the
+        // SEP side is executing firmware and owns the mailbox.
+        iprintf("sepbd: [ev] listening for startup(0xd2)/boot(0xd) frames...\n");
+        for (int i = 0; i < 600; i++) {
+            spin(24000);
+            uint64_t r = sep_fast_check_mailbox();
+            if (r) {
+                union sepbd_msg_u rm = {.val = r};
+                const char *what = "unknown";
+                if (rm.msg.ep == 0xFF && rm.msg.opcode == 0xd2) what = "startup event";
+                else if (rm.msg.ep == 0 && rm.msg.opcode == 0xd) what = "SEOS BOOTED";
+                else if (rm.msg.ep == 0xFF && rm.msg.opcode == 101) what = "seprom ping reply";
+                iprintf("sepbd: frame %016llx after %d ms: ep=%x op=%x  << %s\n",
+                        (unsigned long long)r, i, rm.msg.ep, rm.msg.opcode, what);
+                return;
+            }
+        }
+        iprintf("sepbd: no frame in 6000 ms\n");
+        return;
+    }
     uint64_t handler = g_handler_sep_va ? g_handler_sep_va : 0x15f5f8ull;
     iprintf("sepbd: [pongo-ch] sending ep=%x tag=%x op=%x data=%x\n", ep, tag, op, (uint32_t)handler);
     sep_send_msg(ep, tag, op, 0, (uint32_t)handler);
@@ -674,11 +783,17 @@ static void sepbd_boot_cmd(const char *cmd, char *args) {
     mb_send(m.val);
     spin(24000);
 
-    // resume: opcode 4 lets SEOS boot.
-    m = (union sepbd_msg_u){{255, 0, 4, 0, 0}};
-    mb_send(m.val);
-    for (int i = 0; i < 200; i++) { spin(24000); }
-    iprintf("sepbd: boot issued (check 'sepbd ping')\n");
+    // pwned boot = blackbird jump to 0, mirroring pongo's sep_pwned_boot_auto
+    // (sep_blackbird_jump_noreturn(0, sepb)). After the race SEPROM no longer
+    // answers opcodes; this jump is how the staged firmware at SEP VA 0 starts
+    // executing. noreturn in pongo, but the dispatcher returns control here
+    // for cmd 3 (call with r0), so the shell survives.
+    extern void sep_blackbird_jump(uint32_t addr, uint32_t r0);
+    extern uint32_t sepbp;
+    iprintf("sepbd: blackbird boot: jump 0 r0=sepb(%x)\n", sepbp);
+    sep_blackbird_jump(0, sepbp);
+    spin(24000 * 100);
+    iprintf("sepbd: boot issued (check 'sepbd_mping probe4')\n");
 }
 
 // ─── ping: request frame via blackbird, kick via mailbox, read reply ───

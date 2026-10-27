@@ -668,6 +668,7 @@ PONGO_EXPORT(sep_is_pwned);
 PONGO_EXPORT(sep_send_msg);
 PONGO_EXPORT(sep_check_mailbox);
 PONGO_EXPORT(sep_fast_check_mailbox);
+PONGO_EXPORT(sepbp);
 PONGO_EXPORT(aes);
 PONGO_EXPORT(_impure_ptr);
 PONGO_EXPORT(loader_xfer_recv_size);
