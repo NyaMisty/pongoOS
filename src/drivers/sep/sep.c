@@ -1186,7 +1186,7 @@ void sep_setup(void)
     // scheme C: patch the sepi as reload_sepi hands it to the SEP. pongo's
     // custom entry runs no crt, so constructors never execute; this is the
     // always-taken registration point.
-    sepfw_kpf_hook = sep_bd_sepfw_hook;
+    // sepfw_kpf_hook = sep_bd_sepfw_hook;  // DISABLED (experiment control)
 
     size_t len = 0;
     uint32_t *xnu_wants_booted = dt_prop(gSEPDev, "sepfw-booted", &len);
