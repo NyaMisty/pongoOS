@@ -255,5 +255,6 @@ const void *const sepbd_keep[] __attribute__((used, section("__DATA,__const"))) 
 __attribute__((constructor))
 static void sep_bd_init(void)
 {
-    sepfw_kpf_hook = sep_bd_sepfw_hook;
+    // DISABLED (experiment control): module under test owns all fw patches
+    // sepfw_kpf_hook = sep_bd_sepfw_hook;
 }
