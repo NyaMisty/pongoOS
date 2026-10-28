@@ -792,14 +792,22 @@ static void sepbd_boot_cmd(const char *cmd, char *args) {
     // answers opcodes; this jump is how the staged firmware at SEP VA 0 starts
     // executing. noreturn in pongo, but the dispatcher returns control here
     // for cmd 3 (call with r0), so the shell survives.
-    extern void sep_blackbird_jump(uint32_t addr, uint32_t r0);
+    // Fire-and-forget kickstart: cmd 3 in the blackbird dispatcher is a
+    // SYNCHRONOUS rpc (it clears sts only when the called function returns),
+    // and SEOS never returns — waiting on sts hangs forever. pongo's own
+    // boot path uses the noreturn variant for exactly this reason; write the
+    // slots ourselves with the same ordering and do not poll.
     extern uint32_t sepbp;
-    iprintf("sepbd: blackbird boot: jump 0 r0=sepb(%x)\n", sepbp);
-    sep_blackbird_jump(0, sepbp);
-    spin(24000 * 50);                        // let SEOS boot
-    sep_discover_endpoints();                // pongo-side capture (prints table)
-    spin(24000 * 50);
-    iprintf("sepbd: boot issued (check 'sepbd_mping probe4')\n");
+    extern volatile uint32_t *remote_addr, *remote_data, *remote_sts;
+    iprintf("sepbd: blackbird kickstart (noreturn semantics) r0=sepb(%x)\n", sepbp);
+    *remote_addr = 0;
+    *remote_data = sepbp;
+    *remote_sts = 3;
+    __asm__ volatile("dsb sy");
+    __asm__ volatile("isb");
+    // give SEOS its boot second, then return to the shell (probe via sepbd_disc)
+    spin(24000 * 100);
+    iprintf("sepbd: kickstart issued (try 'sepbd_disc kick' / 'sepbd_disc listen')\n");
 }
 
 // ─── ping: request frame via blackbird, kick via mailbox, read reply ───
