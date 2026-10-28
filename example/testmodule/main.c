@@ -761,102 +761,23 @@ static void sepbd_mping_cmd(const char *cmd, char *args) {
 
 static void sepbd_boot_cmd(const char *cmd, char *args) {
     if (!sep_is_pwned) { iprintf("sepbd: sep not pwned\n"); return; }
-    sepbd_mailbox_init();
-    if (!g_mb32 && !g_mb64) return;
 
-    // fwload: opcode 6, param 0, data = phys(fw) >> 12 — same as sep.c.
-    // If sepbd_patch2 ran in this session, its working copy img[] holds the
-    // patched container; fwload from THAT, not from the DT's pristine copy
-    // (which would overwrite every patch we planted in SEP memory).
-    dt_node_t *map = dt_find(gDeviceTree, "/chosen/memory-map");
-    if (!map) { iprintf("sepbd: no memory-map node\n"); return; }
-    uint32_t len = 0;
-    uint64_t *fwent = dt_prop(map, "SEPFW", &len);
-    if (!fwent || len < 16) { iprintf("sepbd: no firmware\n"); return; }
-    uint64_t phys = vatophys((uint64_t)(uintptr_t)phystokv(fwent[0]));
-    if (g_img_size) {
-        // stage the patched container into pongo's dedicated fwload buffer
-        // (guaranteed DMA-contiguous for the SEPROM fetch), then fwload from
-        // there exactly as the pristine path does
-        void *fwbuf = phystokv(fwent[0]);
-        uint32_t cp = (uint32_t)fwent[1];
-        if ((size_t)cp > g_img_size) cp = (uint32_t)g_img_size;
-        memcpy(fwbuf, img, cp);
-        iprintf("sepbd: patched copy staged into fwload buffer (%x B)\n", cp);
-    }
-    union sepbd_msg_u m = {.msg = {255, 0, 6, 0, (uint32_t)(phys >> 12)}};
-    iprintf("sepbd: fwload phys %llx\n", (unsigned long long)phys);
-    mb_send(m.val);
-    spin(24000);
-
-    // pwned boot = blackbird jump to 0, mirroring pongo's sep_pwned_boot_auto
-    // (sep_blackbird_jump_noreturn(0, sepb)). After the race SEPROM no longer
-    // answers opcodes; this jump is how the staged firmware at SEP VA 0 starts
-    // executing. noreturn in pongo, but the dispatcher returns control here
-    // for cmd 3 (call with r0), so the shell survives.
-    // Kickstart, then drive the TXM handshake it waits for.
-    //
-    // The jump lands in the TXM entry (container[0] -> 0x1320 -> ... -> 0x142c
-    // BL sub_197C), whose first act is to POLL for an AP frame (loader 0x1a24:
-    // wait snd FIFO non-empty). The pre-pwn opcode sends were going nowhere
-    // (SEPROM had already left); the frames must come AFTER the jump:
-    //   1. blackbird cmd3 fire-and-forget into VA 0 (noreturn semantics —
-    //      cmd3 is a synchronous rpc and SEOS never returns)
-    //   2. {ep=0xFF, op=6, data=fw>>12}  fwload  (TXM consumes, replies 0x6A)
-    //   3. {ep=0xFF, op=8, data=0}       resume  (XNU A10 shape; fallback op=4)
+    // Mirror the stock chain EXACTLY (sep auto -> bootx):
+    //   sep pwn already staged the firmware (race fwload + reload_sepi) and
+    //   set is_waiting_to_boot; the ONLY remaining step is the kickstart.
+    //   No manual fwload opcode (the race owns that), no frame sequence —
+    //   XNU drives A1..A13 itself in the stock chain, and in pongo-only use
+    //   we watch for the advertise burst instead.
     extern uint32_t sepbp;
     extern volatile uint32_t *remote_addr, *remote_data, *remote_sts;
-    iprintf("sepbd: kickstart r0=sepb(%x), then TXM handshake\n", sepbp);
+    iprintf("sepbd: kickstart r0=sepb(%x) (stock-chain semantics)\n", sepbp);
     *remote_addr = 0;
     *remote_data = sepbp;
     *remote_sts = 3;
     __asm__ volatile("dsb sy");
     __asm__ volatile("isb");
-    spin(24000 * 20);                                  // let TXM reach its poll
-
-    // Drive the TXM handshake state machine in the XNU order (xnu_side.md
-    // table A): the machine advances 0->1->3->7->... one frame at a time and
-    // every request has a defined reply in _bootAction. The old single op-6
-    // send skipped the whole sequence and left it waiting. Order matters.
-    struct bootframe { uint8_t ep, tag, op, param; uint32_t data; const char *name; };
-    static const struct bootframe seq[] = {
-        {0x00, 1, 0x02, 0x00, 0, "A1 status"},
-        {0x00, 1, 0x05, 0x00, 0, "A2 BootSEP"},
-        {0x00, 1, 0x03, 0x00, 0, "A4 nonce req"},
-        {0x00, 1, 0x04, 0x00, 0, "A5 nonce w0"},
-        {0x00, 1, 0x04, 0x01, 0, "A5 nonce w1"},
-        {0x00, 1, 0x04, 0x02, 0, "A5 nonce w2"},
-        {0x00, 1, 0x04, 0x03, 0, "A5 nonce w3"},
-        {0x00, 1, 0x04, 0x04, 0, "A5 nonce w4"},
-        {0x00, 1, 0x02, 0x00, 0, "A8 status ck"},
-        {0x00, 1, 0x02, 0x00, 0, "A8 status ck2"},
-        {0x00, 1, 0x07, 0x00, 0, "A13 shmbuf"},
-    };
-    for (unsigned k = 0; k < sizeof seq / sizeof seq[0]; k++) {
-        iprintf("sepbd: boot %s {ep=%x op=%x p=%x}\n", seq[k].name, seq[k].ep, seq[k].op, seq[k].param);
-        sep_send_msg(seq[k].ep, seq[k].tag, seq[k].op, seq[k].param, seq[k].data);
-        int got = 0;
-        for (int i = 0; i < 100 && !got; i++) {
-            spin(24000);
-            uint64_t r = sep_fast_check_mailbox();
-            if (r) {
-                union sepbd_msg_u m = {.val = r};
-                iprintf("sepbd:   reply ep=%x op=%x data=%x (%d ms)\n",
-                        m.msg.ep, m.msg.opcode, m.msg.data, i);
-                got = 1;
-            }
-        }
-        if (!got) iprintf("sepbd:   (no reply, continuing)\n");
-    }
-    iprintf("sepbd: A9 Boot {op=6 data=%x}\n", (uint32_t)(phys >> 12));
-    sep_send_msg(0x00, 1, 0x06, 0, (uint32_t)(phys >> 12));
-    for (int i = 0; i < 100; i++) { spin(24000); uint64_t r = sep_fast_check_mailbox();
-        if (r) { union sepbd_msg_u m = {.val = r};
-            iprintf("sepbd:   A9 reply ep=%x op=%x\n", m.msg.ep, m.msg.opcode); break; } }
-    iprintf("sepbd: A10 Resume {op=8}\n");
-    sep_send_msg(0x00, 1, 0x08, 0, 0);
     spin(24000 * 100);
-    iprintf("sepbd: boot sequence complete (try 'sepbd_disc listen 3000')\n");
+    iprintf("sepbd: kickstarted (watch 'sep: disc:' lines / sepbd_disc listen)\n");
 }
 
 // ─── ping: request frame via blackbird, kick via mailbox, read reply ───
@@ -977,6 +898,83 @@ static void sepbd_disc_cmd(const char *cmd, char *args) {
     iprintf("sepbd: [disc] table now has %u entr%s\n", before, before == 1 ? "y" : "ies");
 }
 
+
+// ─── window experiment: TXM polls [sepbase+0x10], pongo writes [sepbase+0x4000+0x10]
+// If the two windows are not connected, everything pongo sends is invisible to
+// the TXM (its poll never sees a frame). sepbd_win writes the frame at BOTH
+// windows and dumps status from both, so one run tells us which one moves.
+static void sepbd_win_cmd(const char *cmd, char *args) {
+    sepbd_mailbox_init();
+    if (!g_mb32) { iprintf("sepbd: no mb32\n"); return; }
+    dt_node_t *sep = dt_find(gDeviceTree, "/device-tree/arm-io/sep");
+    if (!sep) { iprintf("sepbd: no sep node\n"); return; }
+    uint32_t len = 0;
+    uint64_t *reg = dt_prop(sep, "reg", &len);
+    if (!reg || len < 16) { iprintf("sepbd: bad reg\n"); return; }
+    uintptr_t base = (uintptr_t)(reg[0] + gIOBase);
+    volatile uint32_t *w4k = (volatile uint32_t *)(base + 0x4000);   // pongo window
+    volatile uint32_t *w00 = (volatile uint32_t *)base;              // TXM-polled window
+    iprintf("sepbd: sep base %llx; dump both windows before:\n", (unsigned long long)base);
+    for (int i = 0; i < 0x28; i += 4)
+        iprintf("sepbd:   +%-3x: w00=%08x w4k=%08x\n", i, w00[i/4], w4k[i/4]);
+    // a status-shaped frame {ep=0,op=2} at both windows
+    uint32_t lo = 0x02 << 16;
+    w4k[4] = lo; w4k[5] = 0;          // +0x10/+0x14 (pongo send path)
+    w00[4] = lo; w00[5] = 0;          // +0x10/+0x14 (TXM poll target)
+    __asm__ volatile("dsb sy");
+    spin(24000 * 50);
+    iprintf("sepbd: after write, both windows:\n");
+    for (int i = 0; i < 0x28; i += 4)
+        iprintf("sepbd:   +%-3x: w00=%08x w4k=%08x\n", i, w00[i/4], w4k[i/4]);
+}
+
+
+// ─── diag: dump every pondo-side SEP observable — no hanging calls ───
+// pongo's irq dispatcher already records the protocol milestones in five
+// globals (set in sep_handle_msg_from_sep); reading them tells us exactly
+// how far the SEP got, with zero risk of hanging on a busy dispatcher.
+static void sepbd_diag_cmd(const char *cmd, char *args) {
+    extern uint32_t sepbp;
+    extern volatile uint32_t sep_has_loaded, sep_has_booted, sep_has_panicked;
+    extern volatile uint32_t sep_has_done_tz0, seprom_has_left_to_sepos;
+    iprintf("sepbd: === diag ===\n");
+    iprintf("sepbd: pwned=%d sepb=%x\n", (int)sep_is_pwned, sepbp);
+    iprintf("sepbd: loaded=%u booted=%u panicked=%u tz0=%u rom_left=%u\n",
+            sep_has_loaded, sep_has_booted, sep_has_panicked,
+            sep_has_done_tz0, seprom_has_left_to_sepos);
+    // both mailbox windows
+    dt_node_t *sep = dt_find(gDeviceTree, "/device-tree/arm-io/sep");
+    if (sep) {
+        uint32_t len = 0;
+        uint64_t *reg = dt_prop(sep, "reg", &len);
+        if (reg && len >= 16) {
+            uintptr_t base = (uintptr_t)(reg[0] + gIOBase);
+            volatile uint32_t *w4k = (volatile uint32_t *)(base + 0x4000);
+            volatile uint32_t *w00 = (volatile uint32_t *)base;
+            iprintf("sepbd: sep base %llx\n", (unsigned long long)base);
+            for (int i = 0; i < 0x24; i += 4)
+                iprintf("sepbd:   +%-3x w00=%08x w4k=%08x\n", i, w00[i/4], w4k[i/4]);
+        }
+    } else iprintf("sepbd: no sep node\n");
+    // bounded SEOS probe: cmsg 0x14 security-mode query (XNU table B)
+    sepbd_mailbox_init();
+    if (g_mb32) {
+        iprintf("sepbd: probing SEOS: {ep=0,op=0x14}...\n");
+        sep_send_msg(0x00, 0x01, 0x14, 0x00, 0);
+        for (int i = 0; i < 200; i++) {
+            spin(24000);
+            uint64_t r = sep_fast_check_mailbox();
+            if (r) {
+                union sepbd_msg_u m = {.val = r};
+                iprintf("sepbd: SEOS REPLY ep=%x op=%x data=%x (%d ms) — ALIVE\n",
+                        m.msg.ep, m.msg.opcode, m.msg.data, i);
+                return;
+            }
+        }
+        iprintf("sepbd: no SEOS reply in 2s\n");
+    }
+}
+
 void module_entry(void) {
     sepbd_recover_state();
     command_register("sepbd_install", "write handler into SKS gap of staged sepi", sepbd_install_cmd);
@@ -984,6 +982,8 @@ void module_entry(void) {
     command_register("sepbd_patch", "monolithic: patch sepi inside SEP (pre-boot)", sepbd_patch_cmd);
     command_register("sepbd_patch2", "two-stage: tail-gap injector + decompressed-image patches", sepbd_patch2_cmd);
     command_register("sepbd_mping", "pure-mailbox ping (no blackbird)", sepbd_mping_cmd);
+    command_register("sepbd_diag", "dump all SEP observables + dispatcher liveness", sepbd_diag_cmd);
+    command_register("sepbd_win", "dump/write both mailbox windows (TXM view vs pongo view)", sepbd_win_cmd);
     command_register("sepbd_disc", "discover SEP endpoints + optional probe: sepbd_disc [ep]", sepbd_disc_cmd);
     command_register("sepbd_peekimg", "dump words from pulled SEOS image", sepbd_peekimg_cmd);
     command_register("sepbd_b64", "base64 dump: sepbd_b64 <off> <len>", sepbd_b64_cmd);
