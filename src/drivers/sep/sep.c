@@ -219,7 +219,44 @@ uint8_t SEP_PANIC[400] = {0};
 uint64_t * SEP_PANIC_PTR = (uint64_t*)&SEP_PANIC;
 uint32_t SEP_PANIC_CNT = 0;
 
+// ── Discovery endpoint capture (see alignment/discovery_protocol.md) ──
+// SEOS advertises every service with {ep=0xFD, op=0|1, param=ep_id, data=4CC};
+// event-driven (service open / data pump / status query all re-emit it).
+// The irq task already drains every frame — hook the dispatch point so the
+// table fills no matter who was polling, and fire an event for waiters.
+#define SEP_DISC_MAX 16
+struct sep_disc_entry {
+    uint32_t fourcc;
+    uint8_t  ep;
+    uint8_t  op;
+};
+static struct sep_disc_entry sep_disc_table[SEP_DISC_MAX];
+static unsigned sep_disc_count;
+struct event sep_disc_event;
+
+void sep_disc_reset(void) { sep_disc_count = 0; }
+
+struct sep_disc_entry *sep_disc_endpoints(unsigned *count) {
+    if (count) *count = sep_disc_count;
+    return sep_disc_count ? sep_disc_table : NULL;
+}
+
+static void sep_disc_note(union sep_message_u msg) {
+    if (msg.msg.ep != 0xFD) return;
+    if (sep_disc_count < SEP_DISC_MAX) {
+        sep_disc_table[sep_disc_count].fourcc = msg.msg.data;
+        sep_disc_table[sep_disc_count].ep     = msg.msg.param;
+        sep_disc_table[sep_disc_count].op     = msg.msg.opcode;
+        sep_disc_count++;
+    }
+    fiprintf(stderr, "sep: disc: %c%c%c%c -> ep %u\n",
+             (char)(msg.msg.data), (char)(msg.msg.data >> 8),
+             (char)(msg.msg.data >> 16), (char)(msg.msg.data >> 24), msg.msg.param);
+    event_fire(&sep_disc_event);
+}
+
 void sep_handle_msg_from_sep(union sep_message_u msg) {
+    sep_disc_note(msg);
     if (msg.msg.ep == 0xff) {
         // SEPROM
         sep_handle_msg_from_seprom(msg);
@@ -436,7 +473,6 @@ static void sep_blackbird_boot(uint32_t sepb) {
     return sep_blackbird_jump_noreturn(0, sepb);
 }
 static uint32_t sepbp;
-void sep_discover_endpoints(void);  // defined below; called from boot path
 static void sep_pwned_boot_auto(void) {
     if (is_waiting_to_boot) {
         if(!sep_is_pwned) {
@@ -467,53 +503,6 @@ static void sep_pwned_boot_auto(void) {
         panic("SEPOS patch failed - BPR is set :(");
     }
 #endif
-}
-// ── Discovery endpoint capture (per alignment/discovery_protocol.md) ──
-// SEOS advertises every service unprompted with frames
-//   {ep=0xFD, tag=0, op=0|1, param=slot, data=4CC}
-// built at loader 0x91d40..0x91d86 right after boot; the AP never queries.
-// Capture them into a table so anything on the AP side (pongo, module,
-// XNU-kext replacements) can address services by their runtime ep number.
-#define SEP_DISC_EP 0xFDu
-#define SEP_DISC_MAX 16
-struct sep_disc_entry {
-    uint32_t fourcc;
-    uint8_t  ep;
-    uint8_t  op;
-    uint8_t  slot;
-};
-static struct sep_disc_entry sep_disc_table[SEP_DISC_MAX];
-static unsigned sep_disc_count;
-
-void sep_discover_endpoints(void) {
-    sep_disc_count = 0;
-    fiprintf(stderr, "sep: discovery: listening for advertise frames\n");
-    // XNU's handler registers these before boot and they arrive in a burst
-    // right after SEOS boots; 1s of quiet ends the collection window.
-    unsigned quiet = 0;
-    for (unsigned iter = 0; iter < 400 && quiet < 100; iter++) {
-        uint64_t r = sep_fast_check_mailbox();
-        if (!r) { quiet++; spin(2400); continue; }
-        quiet = 0;
-        union sep_message_u m = {.val = r};
-        if (m.msg.ep != SEP_DISC_EP) continue;
-        if (sep_disc_count < SEP_DISC_MAX) {
-            sep_disc_table[sep_disc_count].fourcc = m.msg.data;
-            sep_disc_table[sep_disc_count].ep     = m.msg.param;  // advertised ep_id = byte3
-            sep_disc_table[sep_disc_count].op     = m.msg.opcode;
-            sep_disc_table[sep_disc_count].slot   = m.msg.param;  // slot index shares the field
-            sep_disc_count++;
-        }
-        fiprintf(stderr, "sep: discovery: %c%c%c%c -> ep %u\n",
-                 (char)(m.msg.data), (char)(m.msg.data >> 8),
-                 (char)(m.msg.data >> 16), (char)(m.msg.data >> 24), m.msg.param);
-    }
-    fiprintf(stderr, "sep: discovery: %u endpoint(s) captured\n", sep_disc_count);
-}
-
-struct sep_disc_entry *sep_discovered_endpoints(unsigned *count) {
-    if (count) *count = sep_disc_count;
-    return sep_disc_count ? sep_disc_table : NULL;
 }
 
 void sep_copy_block(uint32_t to, void* from) {

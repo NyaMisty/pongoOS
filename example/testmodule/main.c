@@ -39,10 +39,12 @@ extern unsigned long strtoul(const char *, char **, int);
 extern bool sep_is_pwned;
 extern void sep_send_msg(uint8_t ep, uint8_t tag, uint8_t opcode, uint8_t param, uint32_t data);
 extern uint64_t sep_fast_check_mailbox(void);
-// pongo-side discovery capture (sep.c): table already gathered at boot
-extern void sep_discover_endpoints(void);
-struct sep_disc_entry_mod { uint32_t fourcc; uint8_t ep; uint8_t op; uint8_t slot; };
-extern struct sep_disc_entry_mod *sep_discovered_endpoints(unsigned *count);
+// pongo-side capture lives IN the irq dispatcher now (sep_handle_msg_from_sep
+// -> sep_disc_note): every frame passes a single dispatch point, so the table
+// fills with zero races. Modules just read it / watch its count.
+extern void sep_disc_reset(void);
+struct sep_disc_entry_mod { uint32_t fourcc; uint8_t ep; uint8_t op; };
+extern struct sep_disc_entry_mod *sep_disc_endpoints(unsigned *count);
 extern uint32_t sep_blackbird_read(uint32_t addr);
 extern void sep_blackbird_write(uint32_t addr, uint32_t val);
 extern void sep_blackbird_jump(uint32_t addr, uint32_t r0);
@@ -864,64 +866,36 @@ static void sepbd_ping_cmd(const char *cmd, char *args) {
 //   sepbd_disc table        print the accumulated endpoint table
 //   sepbd_disc probe <ep>   one request to <ep> (tag1 op0x17), await reply
 #define SEPBD_DISC_EP   0xFDu
-#define SEPBD_DISC_MAX  16
-struct sepbd_disc_ent { uint32_t fourcc; uint8_t ep; uint8_t op; };
-static struct sepbd_disc_ent sepbd_disc_tbl[SEPBD_DISC_MAX];
-static unsigned sepbd_disc_n;
-static int sepbd_disc_note(uint64_t r) {
-    union sepbd_msg_u m = {.val = r};
-    if (m.msg.ep != SEPBD_DISC_EP) {
-        iprintf("sepbd: [disc] other frame: ep=%x op=%x data=%x\n",
-                m.msg.ep, m.msg.opcode, m.msg.data);
-        return 0;
-    }
-    unsigned k;
-    for (k = 0; k < sepbd_disc_n; k++)
-        if (sepbd_disc_tbl[k].ep == m.msg.param) break;
-    if (k == sepbd_disc_n && sepbd_disc_n < SEPBD_DISC_MAX) {
-        sepbd_disc_tbl[sepbd_disc_n].fourcc = m.msg.data;
-        sepbd_disc_tbl[sepbd_disc_n].ep     = m.msg.param;
-        sepbd_disc_tbl[sepbd_disc_n].op     = m.msg.opcode;
-        sepbd_disc_n++;
-    }
-    iprintf("sepbd: [disc] ADVERTISE op=%x ep=%u svc=%c%c%c%c\n",
-            m.msg.opcode, m.msg.param,
-            (char)(m.msg.data), (char)(m.msg.data >> 8),
-            (char)(m.msg.data >> 16), (char)(m.msg.data >> 24));
-    return 1;
-}
 static void sepbd_disc_cmd(const char *cmd, char *args) {
     sepbd_mailbox_init();
     if (!g_mb32 && !g_mb64) { iprintf("sepbd: mailbox regs not mapped\n"); return; }
 
     if (args && args[0]=='t') {                       // table
-        if (!sepbd_disc_n) { iprintf("sepbd: [disc] table empty\n"); return; }
-        for (unsigned k = 0; k < sepbd_disc_n; k++)
+        unsigned n = 0;
+        struct sep_disc_entry_mod *tbl = sep_disc_endpoints(&n);
+        if (!tbl || !n) { iprintf("sepbd: [disc] table empty\n"); return; }
+        for (unsigned k = 0; k < n; k++)
             iprintf("sepbd: [disc]   %c%c%c%c -> ep %u (op %x)\n",
-                    (char)(sepbd_disc_tbl[k].fourcc), (char)(sepbd_disc_tbl[k].fourcc >> 8),
-                    (char)(sepbd_disc_tbl[k].fourcc >> 16), (char)(sepbd_disc_tbl[k].fourcc >> 24),
-                    sepbd_disc_tbl[k].ep, sepbd_disc_tbl[k].op);
+                    (char)(tbl[k].fourcc), (char)(tbl[k].fourcc >> 8),
+                    (char)(tbl[k].fourcc >> 16), (char)(tbl[k].fourcc >> 24),
+                    tbl[k].ep, tbl[k].op);
         return;
     }
     if (args && args[0]=='k') {                       // kick: elicit advertise
-        // the resident sep_irq task races us for every frame (it drains the
-        // slot within microseconds of the interrupt; ep 0xFD falls through
-        // its dispatcher and is dropped silently). hold interrupts for the
-        // whole window — same discipline pongo's seprom_* helpers use.
-        iprintf("sepbd: [disc] kick: sending {ep=FD, op=0x2F} (irqs held)...\n");
-        extern void disable_interrupts(void);
-        extern void enable_interrupts(void);
-        disable_interrupts();
+        // capture runs in pongo's irq dispatcher — no race, just watch the
+        // table count (it is plain memory written by sep_disc_note)
+        unsigned before = 0; sep_disc_endpoints(&before);
+        iprintf("sepbd: [disc] kick: sending {ep=FD, op=0x2F}, watching table...\n");
         sep_send_msg(SEPBD_DISC_EP, 0x00, 0x2F, 0x00, 0);
-        int got = 0;
         for (int i = 0; i < 300; i++) {               // 3s
             spin(24000);
-            uint64_t r = sep_fast_check_mailbox();
-            if (r) { got += sepbd_disc_note(r); if (got) break; }
+            unsigned now = 0; sep_disc_endpoints(&now);
+            if (now > before) {
+                iprintf("sepbd: [disc] kick: advertise captured (round trip OK)\n");
+                return;
+            }
         }
-        enable_interrupts();
-        if (got) iprintf("sepbd: [disc] kick: advertise received (round trip OK)\n");
-        else     iprintf("sepbd: [disc] kick: no advertise (SEOS down or shape wrong)\n");
+        iprintf("sepbd: [disc] kick: no advertise (SEOS down or shape wrong)\n");
         return;
     }
     if (args && args[0]=='p') {                       // probe <ep>
@@ -943,22 +917,17 @@ static void sepbd_disc_cmd(const char *cmd, char *args) {
         iprintf("sepbd: [disc] no reply from ep %x\n", ep);
         return;
     }
-    // default: listen [ms] — interrupts held so the irq task cannot steal
-    extern void disable_interrupts(void);
-    extern void enable_interrupts(void);
+    // default: listen [ms] — watch the dispatcher-fed table (no racing)
     int ms = 2000;
     if (args && args[0]=='l') { char *sp = strchr(args, ' '); if (sp) ms = (int)strtoul(sp + 1, NULL, 0); }
-    iprintf("sepbd: [disc] listening %d ms (irqs held)...\n", ms);
-    int got = 0;
-    disable_interrupts();
+    unsigned before = 0; sep_disc_endpoints(&before);
+    iprintf("sepbd: [disc] listening %d ms (dispatcher-fed)...\n", ms);
     for (int i = 0; i < ms; i++) {
         spin(24000);
-        uint64_t r = sep_fast_check_mailbox();
-        if (r) got += sepbd_disc_note(r);
+        unsigned now = 0; sep_disc_endpoints(&now);
+        if (now > before) before = now;   // entries printed live by pongo (stderr)
     }
-    enable_interrupts();
-    iprintf("sepbd: [disc] captured %d frame(s), table has %u entr(y|ies)\n",
-            got, sepbd_disc_n);
+    iprintf("sepbd: [disc] table now has %u entr%s\n", before, before == 1 ? "y" : "ies");
 }
 
 void module_entry(void) {
