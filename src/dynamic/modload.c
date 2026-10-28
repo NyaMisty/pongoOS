@@ -669,6 +669,8 @@ PONGO_EXPORT(sep_send_msg);
 PONGO_EXPORT(sep_check_mailbox);
 PONGO_EXPORT(sep_fast_check_mailbox);
 PONGO_EXPORT(sepbp);
+PONGO_EXPORT(sep_discover_endpoints);
+PONGO_EXPORT(sep_discovered_endpoints);
 PONGO_EXPORT(aes);
 PONGO_EXPORT(_impure_ptr);
 PONGO_EXPORT(loader_xfer_recv_size);

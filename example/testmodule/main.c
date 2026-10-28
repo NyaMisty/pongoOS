@@ -853,7 +853,7 @@ static void sepbd_disc_cmd(const char *cmd, char *args) {
 
     iprintf("sepbd: [disc] listening for 0xFD advertise frames (2s)...\n");
     int seen = 0;
-    uint32_t name_to_ep[16] = {0};   // data(4CC) -> ep(byte3 of op frames)
+    uint32_t name_to_ep[16] = {0};   // 4CC->ep scratch (printed table is the deliverable; kept for probe automation)
     for (int i = 0; i < 200; i++) {
         spin(24000);
         uint64_t r = sep_fast_check_mailbox();
