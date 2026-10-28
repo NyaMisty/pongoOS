@@ -39,6 +39,10 @@ extern unsigned long strtoul(const char *, char **, int);
 extern bool sep_is_pwned;
 extern void sep_send_msg(uint8_t ep, uint8_t tag, uint8_t opcode, uint8_t param, uint32_t data);
 extern uint64_t sep_fast_check_mailbox(void);
+// pongo-side discovery capture (sep.c): table already gathered at boot
+extern void sep_discover_endpoints(void);
+struct sep_disc_entry_mod { uint32_t fourcc; uint8_t ep; uint8_t op; uint8_t slot; };
+extern struct sep_disc_entry_mod *sep_discovered_endpoints(unsigned *count);
 extern uint32_t sep_blackbird_read(uint32_t addr);
 extern void sep_blackbird_write(uint32_t addr, uint32_t val);
 extern void sep_blackbird_jump(uint32_t addr, uint32_t r0);
@@ -792,7 +796,9 @@ static void sepbd_boot_cmd(const char *cmd, char *args) {
     extern uint32_t sepbp;
     iprintf("sepbd: blackbird boot: jump 0 r0=sepb(%x)\n", sepbp);
     sep_blackbird_jump(0, sepbp);
-    spin(24000 * 100);
+    spin(24000 * 50);                        // let SEOS boot
+    sep_discover_endpoints();                // pongo-side capture (prints table)
+    spin(24000 * 50);
     iprintf("sepbd: boot issued (check 'sepbd_mping probe4')\n");
 }
 
@@ -851,6 +857,24 @@ static void sepbd_disc_cmd(const char *cmd, char *args) {
     if (!g_mb32 && !g_mb64) { iprintf("sepbd: mailbox regs not mapped\n"); return; }
     uint32_t probe_ep = args && *args ? (uint32_t)strtoul(args, NULL, 16) : 0;
 
+    // pongo already captures the advertise burst at boot (sep_discover_endpoints
+    // runs from the boot hook); read that table first — re-listening after the
+    // window only works if SEOS re-advertises (it does not: pure push at boot).
+    {
+        unsigned n = 0;
+        struct sep_disc_entry_mod *tbl = sep_discovered_endpoints(&n);
+        if (tbl && n) {
+            iprintf("sepbd: [disc] %u endpoint(s) from pongo boot capture:\n", n);
+            for (unsigned k = 0; k < n && k < 16; k++)
+                iprintf("sepbd: [disc]   %c%c%c%c -> ep %u (op %x)\n",
+                        (char)(tbl[k].fourcc), (char)(tbl[k].fourcc >> 8),
+                        (char)(tbl[k].fourcc >> 16), (char)(tbl[k].fourcc >> 24),
+                        tbl[k].ep, tbl[k].op);
+            if (probe_ep) goto probe;
+            return;
+        }
+        iprintf("sepbd: [disc] no boot capture; re-listening 2s (post-window, may be empty)\n");
+    }
     iprintf("sepbd: [disc] listening for 0xFD advertise frames (2s)...\n");
     int seen = 0;
     uint32_t name_to_ep[16] = {0};   // 4CC->ep scratch (printed table is the deliverable; kept for probe automation)
@@ -876,6 +900,7 @@ static void sepbd_disc_cmd(const char *cmd, char *args) {
     iprintf("sepbd: [disc] captured %d advertise frame(s)\n", seen);
 
     if (probe_ep) {
+    probe:
         // closure probe: one request to the discovered endpoint, expect any
         // reply on that ep within 2s (sustained_pair.md candidate E shape)
         iprintf("sepbd: [disc] probing ep=%x op=0x17 ...\n", probe_ep);
