@@ -832,6 +832,68 @@ static void sepbd_ping_cmd(const char *cmd, char *args) {
     else iprintf("sepbd: no/invalid reply (routing not wired or SEOS not booted)\n");
 }
 
+
+// ─── Discovery closure: build the endpoint map, then probe one service ──
+// Protocol (discovery_protocol.md): Discovery is SEP-pushed. SEOS advertises
+// every service with frames {ep=0xFD, tag=0, op=0|1, param=slot, data=4CC/OOL}
+// (SEP side builds them at loader 0x91d40-0x91d86, vtable+0x3C send). The AP
+// never queries; XNU's handler (vm 0x640ba98) consumes ep_id=byte3 of the
+// advertise op and registers the service. Endpoint numbers come from the SEPD
+// 28-slot table free-scan (sub_91c46), NOT from a constant — so a pongo-side
+// closure must listen, not guess.
+//
+//   sepbd_disc          — listen 2s, print every 0xFD frame as name:ep
+//   sepbd_disc <hex>    — same, then send one probe {ep=<hex>, op=0x17} and
+//                         wait 2s for a reply (sustained_pair candidate E)
+#define SEPBD_DISC_EP   0xFDu
+static void sepbd_disc_cmd(const char *cmd, char *args) {
+    sepbd_mailbox_init();
+    if (!g_mb32 && !g_mb64) { iprintf("sepbd: mailbox regs not mapped\n"); return; }
+    uint32_t probe_ep = args && *args ? (uint32_t)strtoul(args, NULL, 16) : 0;
+
+    iprintf("sepbd: [disc] listening for 0xFD advertise frames (2s)...\n");
+    int seen = 0;
+    uint32_t name_to_ep[16] = {0};   // data(4CC) -> ep(byte3 of op frames)
+    for (int i = 0; i < 200; i++) {
+        spin(24000);
+        uint64_t r = sep_fast_check_mailbox();
+        if (!r) continue;
+        union sepbd_msg_u m = {.val = r};
+        if (m.msg.ep != SEPBD_DISC_EP) {
+            iprintf("sepbd: [disc] non-discovery frame: ep=%x op=%x param=%x data=%x\n",
+                    m.msg.ep, m.msg.opcode, m.msg.param, m.msg.data);
+            continue;
+        }
+        seen++;
+        // op byte2 selects action; byte3 carries the advertised ep_id
+        uint8_t ad_ep = m.msg.param;
+        iprintf("sepbd: [disc] ADVERTISE op=%x -> ep=%u data(4CC)=%08x\n",
+                m.msg.opcode, ad_ep, m.msg.data);
+        if (m.msg.opcode == 0 && seen <= 16)
+            name_to_ep[seen - 1] = (m.msg.data & 0xFFFF) << 16 | ad_ep;
+    }
+    if (!seen) { iprintf("sepbd: [disc] no 0xFD frames (SEOS not up / not advertising)\n"); return; }
+    iprintf("sepbd: [disc] captured %d advertise frame(s)\n", seen);
+
+    if (probe_ep) {
+        // closure probe: one request to the discovered endpoint, expect any
+        // reply on that ep within 2s (sustained_pair.md candidate E shape)
+        iprintf("sepbd: [disc] probing ep=%x op=0x17 ...\n", probe_ep);
+        sep_send_msg((uint8_t)probe_ep, 0x01, 0x17, 0, 0);
+        for (int i = 0; i < 200; i++) {
+            spin(24000);
+            uint64_t r = sep_fast_check_mailbox();
+            if (r) {
+                union sepbd_msg_u m = {.val = r};
+                iprintf("sepbd: [disc] REPLY ep=%x tag=%x op=%x data=%x after %d ms\n",
+                        m.msg.ep, m.msg.tag, m.msg.opcode, m.msg.data, i);
+                return;
+            }
+        }
+        iprintf("sepbd: [disc] no reply from ep %x\n", probe_ep);
+    }
+}
+
 void module_entry(void) {
     sepbd_recover_state();
     command_register("sepbd_install", "write handler into SKS gap of staged sepi", sepbd_install_cmd);
@@ -839,6 +901,7 @@ void module_entry(void) {
     command_register("sepbd_patch", "monolithic: patch sepi inside SEP (pre-boot)", sepbd_patch_cmd);
     command_register("sepbd_patch2", "two-stage: tail-gap injector + decompressed-image patches", sepbd_patch2_cmd);
     command_register("sepbd_mping", "pure-mailbox ping (no blackbird)", sepbd_mping_cmd);
+    command_register("sepbd_disc", "discover SEP endpoints + optional probe: sepbd_disc [ep]", sepbd_disc_cmd);
     command_register("sepbd_peekimg", "dump words from pulled SEOS image", sepbd_peekimg_cmd);
     command_register("sepbd_b64", "base64 dump: sepbd_b64 <off> <len>", sepbd_b64_cmd);
     command_register("sepbd_ping", "mailbox round-trip test of the backdoor", sepbd_ping_cmd);
