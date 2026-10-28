@@ -839,72 +839,81 @@ static void sepbd_ping_cmd(const char *cmd, char *args) {
 }
 
 
-// ─── Discovery closure: build the endpoint map, then probe one service ──
-// Protocol (discovery_protocol.md): Discovery is SEP-pushed. SEOS advertises
-// every service with frames {ep=0xFD, tag=0, op=0|1, param=slot, data=4CC/OOL}
-// (SEP side builds them at loader 0x91d40-0x91d86, vtable+0x3C send). The AP
-// never queries; XNU's handler (vm 0x640ba98) consumes ep_id=byte3 of the
-// advertise op and registers the service. Endpoint numbers come from the SEPD
-// 28-slot table free-scan (sub_91c46), NOT from a constant — so a pongo-side
-// closure must listen, not guess.
+// ─── Discovery closure (module-only, repeatable) ────────────────────
+// Protocol facts (alignment/discovery_protocol.md + trigger audit):
+//  - SEOS advertises services with frames {ep=0xFD, op=0|1, param=ep_id,
+//    data=4CC}; the AP never needs to query for the table itself, but the
+//    advertise is EVENT-DRIVEN (three SEP-side triggers), so it can be
+//    re-elicited at any time: service-open (XOBM msgid 0x412F/0x4130
+//    handlers call the advertise loop at loader 0x915aa/0x91824) and the
+//    status-query handler at 0x94ba0 embeds one too.
+//  - Endpoints come from the SEPD 28-slot free-scan — runtime values only.
 //
-//   sepbd_disc          — listen 2s, print every 0xFD frame as name:ep
-//   sepbd_disc <hex>    — same, then send one probe {ep=<hex>, op=0x17} and
-//                         wait 2s for a reply (sustained_pair candidate E)
+// Subcommands (each independently repeatable for debugging):
+//   sepbd_disc listen [ms]  passively collect advertise frames
+//   sepbd_disc kick         elicit advertise: send {ep=0xFD, op=0x2F}
+//                           (XOBM-open shaped stimulus), expect >=1 advertise
+//   sepbd_disc table        print the accumulated endpoint table
+//   sepbd_disc probe <ep>   one request to <ep> (tag1 op0x17), await reply
 #define SEPBD_DISC_EP   0xFDu
+#define SEPBD_DISC_MAX  16
+struct sepbd_disc_ent { uint32_t fourcc; uint8_t ep; uint8_t op; };
+static struct sepbd_disc_ent sepbd_disc_tbl[SEPBD_DISC_MAX];
+static unsigned sepbd_disc_n;
+static int sepbd_disc_note(uint64_t r) {
+    union sepbd_msg_u m = {.val = r};
+    if (m.msg.ep != SEPBD_DISC_EP) {
+        iprintf("sepbd: [disc] other frame: ep=%x op=%x data=%x\n",
+                m.msg.ep, m.msg.opcode, m.msg.data);
+        return 0;
+    }
+    unsigned k;
+    for (k = 0; k < sepbd_disc_n; k++)
+        if (sepbd_disc_tbl[k].ep == m.msg.param) break;
+    if (k == sepbd_disc_n && sepbd_disc_n < SEPBD_DISC_MAX) {
+        sepbd_disc_tbl[sepbd_disc_n].fourcc = m.msg.data;
+        sepbd_disc_tbl[sepbd_disc_n].ep     = m.msg.param;
+        sepbd_disc_tbl[sepbd_disc_n].op     = m.msg.opcode;
+        sepbd_disc_n++;
+    }
+    iprintf("sepbd: [disc] ADVERTISE op=%x ep=%u svc=%c%c%c%c\n",
+            m.msg.opcode, m.msg.param,
+            (char)(m.msg.data), (char)(m.msg.data >> 8),
+            (char)(m.msg.data >> 16), (char)(m.msg.data >> 24));
+    return 1;
+}
 static void sepbd_disc_cmd(const char *cmd, char *args) {
     sepbd_mailbox_init();
     if (!g_mb32 && !g_mb64) { iprintf("sepbd: mailbox regs not mapped\n"); return; }
-    uint32_t probe_ep = args && *args ? (uint32_t)strtoul(args, NULL, 16) : 0;
 
-    // pongo already captures the advertise burst at boot (sep_discover_endpoints
-    // runs from the boot hook); read that table first — re-listening after the
-    // window only works if SEOS re-advertises (it does not: pure push at boot).
-    {
-        unsigned n = 0;
-        struct sep_disc_entry_mod *tbl = sep_discovered_endpoints(&n);
-        if (tbl && n) {
-            iprintf("sepbd: [disc] %u endpoint(s) from pongo boot capture:\n", n);
-            for (unsigned k = 0; k < n && k < 16; k++)
-                iprintf("sepbd: [disc]   %c%c%c%c -> ep %u (op %x)\n",
-                        (char)(tbl[k].fourcc), (char)(tbl[k].fourcc >> 8),
-                        (char)(tbl[k].fourcc >> 16), (char)(tbl[k].fourcc >> 24),
-                        tbl[k].ep, tbl[k].op);
-            if (probe_ep) goto probe;
-            return;
-        }
-        iprintf("sepbd: [disc] no boot capture; re-listening 2s (post-window, may be empty)\n");
+    if (args && args[0]=='t') {                       // table
+        if (!sepbd_disc_n) { iprintf("sepbd: [disc] table empty\n"); return; }
+        for (unsigned k = 0; k < sepbd_disc_n; k++)
+            iprintf("sepbd: [disc]   %c%c%c%c -> ep %u (op %x)\n",
+                    (char)(sepbd_disc_tbl[k].fourcc), (char)(sepbd_disc_tbl[k].fourcc >> 8),
+                    (char)(sepbd_disc_tbl[k].fourcc >> 16), (char)(sepbd_disc_tbl[k].fourcc >> 24),
+                    sepbd_disc_tbl[k].ep, sepbd_disc_tbl[k].op);
+        return;
     }
-    iprintf("sepbd: [disc] listening for 0xFD advertise frames (2s)...\n");
-    int seen = 0;
-    uint32_t name_to_ep[16] = {0};   // 4CC->ep scratch (printed table is the deliverable; kept for probe automation)
-    for (int i = 0; i < 200; i++) {
-        spin(24000);
-        uint64_t r = sep_fast_check_mailbox();
-        if (!r) continue;
-        union sepbd_msg_u m = {.val = r};
-        if (m.msg.ep != SEPBD_DISC_EP) {
-            iprintf("sepbd: [disc] non-discovery frame: ep=%x op=%x param=%x data=%x\n",
-                    m.msg.ep, m.msg.opcode, m.msg.param, m.msg.data);
-            continue;
+    if (args && args[0]=='k') {                       // kick: elicit advertise
+        iprintf("sepbd: [disc] kick: sending {ep=FD, op=0x2F} ...\n");
+        sep_send_msg(SEPBD_DISC_EP, 0x00, 0x2F, 0x00, 0);
+        int got = 0;
+        for (int i = 0; i < 300; i++) {               // 3s
+            spin(24000);
+            uint64_t r = sep_fast_check_mailbox();
+            if (r) { got += sepbd_disc_note(r); }
+            if (got) { iprintf("sepbd: [disc] kick: advertise received (round trip OK)\n"); return; }
         }
-        seen++;
-        // op byte2 selects action; byte3 carries the advertised ep_id
-        uint8_t ad_ep = m.msg.param;
-        iprintf("sepbd: [disc] ADVERTISE op=%x -> ep=%u data(4CC)=%08x\n",
-                m.msg.opcode, ad_ep, m.msg.data);
-        if (m.msg.opcode == 0 && seen <= 16)
-            name_to_ep[seen - 1] = (m.msg.data & 0xFFFF) << 16 | ad_ep;
+        iprintf("sepbd: [disc] kick: no advertise (SEOS down or shape wrong)\n");
+        return;
     }
-    if (!seen) { iprintf("sepbd: [disc] no 0xFD frames (SEOS not up / not advertising)\n"); return; }
-    iprintf("sepbd: [disc] captured %d advertise frame(s)\n", seen);
-
-    if (probe_ep) {
-    probe:
-        // closure probe: one request to the discovered endpoint, expect any
-        // reply on that ep within 2s (sustained_pair.md candidate E shape)
-        iprintf("sepbd: [disc] probing ep=%x op=0x17 ...\n", probe_ep);
-        sep_send_msg((uint8_t)probe_ep, 0x01, 0x17, 0, 0);
+    if (args && args[0]=='p') {                       // probe <ep>
+        uint32_t ep = (args[1] == 'r' && args[2] == 'o') ?
+            (uint32_t)strtoul(args + 5, NULL, 16) : (uint32_t)strtoul(args + 1, NULL, 16);
+        if (!ep) { iprintf("sepbd: [disc] usage: sepbd_disc probe <hexep>\n"); return; }
+        iprintf("sepbd: [disc] probing ep=%x ...\n", ep);
+        sep_send_msg((uint8_t)ep, 0x01, 0x17, 0, 0);
         for (int i = 0; i < 200; i++) {
             spin(24000);
             uint64_t r = sep_fast_check_mailbox();
@@ -915,8 +924,21 @@ static void sepbd_disc_cmd(const char *cmd, char *args) {
                 return;
             }
         }
-        iprintf("sepbd: [disc] no reply from ep %x\n", probe_ep);
+        iprintf("sepbd: [disc] no reply from ep %x\n", ep);
+        return;
     }
+    // default: listen [ms]
+    int ms = 2000;
+    if (args && args[0]=='l') { char *sp = strchr(args, ' '); if (sp) ms = (int)strtoul(sp + 1, NULL, 0); }
+    iprintf("sepbd: [disc] listening %d ms...\n", ms);
+    int got = 0;
+    for (int i = 0; i < ms; i++) {
+        spin(24000);
+        uint64_t r = sep_fast_check_mailbox();
+        if (r) got += sepbd_disc_note(r);
+    }
+    iprintf("sepbd: [disc] captured %d frame(s), table has %u entr(y|ies)\n",
+            got, sepbd_disc_n);
 }
 
 void module_entry(void) {

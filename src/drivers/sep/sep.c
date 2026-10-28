@@ -445,7 +445,6 @@ static void sep_pwned_boot_auto(void) {
         }
         sep_blackbird_boot(sepbp);
         fiprintf(stderr, "kickstarted sep\n");
-        sep_discover_endpoints();
     }
     is_waiting_to_boot = 0;
     spin(2400); // wait for sep to come up
