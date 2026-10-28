@@ -39,13 +39,17 @@ extern unsigned long strtoul(const char *, char **, int);
 extern bool sep_is_pwned;
 extern void sep_send_msg(uint8_t ep, uint8_t tag, uint8_t opcode, uint8_t param, uint32_t data);
 extern uint64_t sep_fast_check_mailbox(void);
-// pongo-side capture lives IN the irq dispatcher now (sep_handle_msg_from_sep
-// -> sep_disc_note): every frame passes a single dispatch point, so the table
-// fills with zero races. Modules just read it / watch its count.
+extern uint32_t sep_blackbird_read(uint32_t addr);
+// pongo events (fired by the irq dispatcher on every frame / every 0xFD):
+// waiting on an event sleeps this task WITHOUT disabling interrupts, so the
+// dispatcher keeps running. spin() would deafen it (it masks IRQs).
+struct task;
+extern struct event sep_msg_event;   // struct event comes from pongo.h
+extern struct event sep_disc_event;
+extern void event_wait(struct event* ev);
 extern void sep_disc_reset(void);
 struct sep_disc_entry_mod { uint32_t fourcc; uint8_t ep; uint8_t op; };
 extern struct sep_disc_entry_mod *sep_disc_endpoints(unsigned *count);
-extern uint32_t sep_blackbird_read(uint32_t addr);
 extern void sep_blackbird_write(uint32_t addr, uint32_t val);
 extern void sep_blackbird_jump(uint32_t addr, uint32_t r0);
 
@@ -776,7 +780,7 @@ static void sepbd_boot_cmd(const char *cmd, char *args) {
     *remote_sts = 3;
     __asm__ volatile("dsb sy");
     __asm__ volatile("isb");
-    spin(24000 * 100);
+    for (int i = 0; i < 20; i++) event_wait(&sep_msg_event);  // let frames flow
     iprintf("sepbd: kickstarted (watch 'sep: disc:' lines / sepbd_disc listen)\n");
 }
 
@@ -855,15 +859,15 @@ static void sepbd_disc_cmd(const char *cmd, char *args) {
         unsigned before = 0; sep_disc_endpoints(&before);
         iprintf("sepbd: [disc] kick: sending {ep=FD, op=0x2F}, watching table...\n");
         sep_send_msg(SEPBD_DISC_EP, 0x00, 0x2F, 0x00, 0);
-        for (int i = 0; i < 300; i++) {               // 3s
-            spin(24000);
+        for (int i = 0; i < 30; i++) {                // 30 event rounds
+            event_wait(&sep_disc_event);
             unsigned now = 0; sep_disc_endpoints(&now);
             if (now > before) {
                 iprintf("sepbd: [disc] kick: advertise captured (round trip OK)\n");
                 return;
             }
         }
-        iprintf("sepbd: [disc] kick: no advertise (SEOS down or shape wrong)\n");
+        iprintf("sepbd: [disc] kick: no advertise after 30 events\n");
         return;
     }
     if (args && args[0]=='p') {                       // probe <ep>
@@ -889,11 +893,11 @@ static void sepbd_disc_cmd(const char *cmd, char *args) {
     int ms = 2000;
     if (args && args[0]=='l') { char *sp = strchr(args, ' '); if (sp) ms = (int)strtoul(sp + 1, NULL, 0); }
     unsigned before = 0; sep_disc_endpoints(&before);
-    iprintf("sepbd: [disc] listening %d ms (dispatcher-fed)...\n", ms);
-    for (int i = 0; i < ms; i++) {
-        spin(24000);
+    iprintf("sepbd: [disc] waiting for advertise events (%d iters)...\n", ms / 100);
+    for (int i = 0; i < ms / 100; i++) {
+        event_wait(&sep_disc_event);             // wakes on every 0xFD frame
         unsigned now = 0; sep_disc_endpoints(&now);
-        if (now > before) before = now;   // entries printed live by pongo (stderr)
+        if (now > before) { before = now; if (i) continue; }
     }
     iprintf("sepbd: [disc] table now has %u entr%s\n", before, before == 1 ? "y" : "ies");
 }
@@ -956,22 +960,45 @@ static void sepbd_diag_cmd(const char *cmd, char *args) {
                 iprintf("sepbd:   +%-3x w00=%08x w4k=%08x\n", i, w00[i/4], w4k[i/4]);
         }
     } else iprintf("sepbd: no sep node\n");
+    // TXM reads its boot structure via SRAM 0xcd907020 (loader 0x19ac:
+    // LDR R0,[R0] with R0=0xcd907020, then magic-checked 'Geri'/'DwRB' at
+    // +0/+4 of the pointee, version==1 at +8). If that pointer is dead or
+    // the magic is wrong, the TXM parks in a WFE loop before ever touching
+    // our bytes — peek it via blackbird (still alive pre-kickstart).
+    {
+        extern uint32_t sep_blackbird_read(uint32_t addr);
+        uint32_t p = sep_blackbird_read(0xcd907020u);
+        iprintf("sepbd: boot-struct ptr @cd907020 = %x\n", p);
+        if (p > 0x1000 && p < 0x20000000u) {
+            uint32_t m0 = sep_blackbird_read(p);
+            uint32_t m1 = sep_blackbird_read(p + 4);
+            uint32_t ver = sep_blackbird_read(p + 8);
+            iprintf("sepbd:   ->[%x]: %08x %08x ver=%u %s\n", p, m0, m1, ver,
+                    (m0 == 0x72694765u && m1 == 0x44527742u && ver == 1)
+                        ? "MAGIC OK" : "MAGIC MISMATCH");
+        }
+        // also the fwload doorbell/counter the state machine uses
+        iprintf("sepbd:   cd907028/7030/7040 = %x %x %x\n",
+                sep_blackbird_read(0xcd907028u),
+                sep_blackbird_read(0xcd907030u),
+                sep_blackbird_read(0xcd907040u));
+    }
     // bounded SEOS probe: cmsg 0x14 security-mode query (XNU table B)
     sepbd_mailbox_init();
     if (g_mb32) {
         iprintf("sepbd: probing SEOS: {ep=0,op=0x14}...\n");
         sep_send_msg(0x00, 0x01, 0x14, 0x00, 0);
-        for (int i = 0; i < 200; i++) {
-            spin(24000);
+        for (int i = 0; i < 20; i++) {
+            event_wait(&sep_msg_event);          // sleeps with IRQs enabled
             uint64_t r = sep_fast_check_mailbox();
             if (r) {
                 union sepbd_msg_u m = {.val = r};
-                iprintf("sepbd: SEOS REPLY ep=%x op=%x data=%x (%d ms) — ALIVE\n",
+                iprintf("sepbd: SEOS REPLY ep=%x op=%x data=%x (iter %d) — ALIVE\n",
                         m.msg.ep, m.msg.opcode, m.msg.data, i);
                 return;
             }
         }
-        iprintf("sepbd: no SEOS reply in 2s\n");
+        iprintf("sepbd: no SEOS reply after 20 event waits\n");
     }
 }
 

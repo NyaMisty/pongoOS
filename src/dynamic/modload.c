@@ -680,6 +680,7 @@ PONGO_EXPORT(remote_sts);
 PONGO_EXPORT(sep_disc_reset);
 PONGO_EXPORT(sep_disc_endpoints);
 PONGO_EXPORT(sep_disc_event);
+PONGO_EXPORT(sep_msg_event);
 PONGO_EXPORT(aes);
 PONGO_EXPORT(_impure_ptr);
 PONGO_EXPORT(loader_xfer_recv_size);
