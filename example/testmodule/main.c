@@ -794,22 +794,69 @@ static void sepbd_boot_cmd(const char *cmd, char *args) {
     // answers opcodes; this jump is how the staged firmware at SEP VA 0 starts
     // executing. noreturn in pongo, but the dispatcher returns control here
     // for cmd 3 (call with r0), so the shell survives.
-    // Fire-and-forget kickstart: cmd 3 in the blackbird dispatcher is a
-    // SYNCHRONOUS rpc (it clears sts only when the called function returns),
-    // and SEOS never returns — waiting on sts hangs forever. pongo's own
-    // boot path uses the noreturn variant for exactly this reason; write the
-    // slots ourselves with the same ordering and do not poll.
+    // Kickstart, then drive the TXM handshake it waits for.
+    //
+    // The jump lands in the TXM entry (container[0] -> 0x1320 -> ... -> 0x142c
+    // BL sub_197C), whose first act is to POLL for an AP frame (loader 0x1a24:
+    // wait snd FIFO non-empty). The pre-pwn opcode sends were going nowhere
+    // (SEPROM had already left); the frames must come AFTER the jump:
+    //   1. blackbird cmd3 fire-and-forget into VA 0 (noreturn semantics —
+    //      cmd3 is a synchronous rpc and SEOS never returns)
+    //   2. {ep=0xFF, op=6, data=fw>>12}  fwload  (TXM consumes, replies 0x6A)
+    //   3. {ep=0xFF, op=8, data=0}       resume  (XNU A10 shape; fallback op=4)
     extern uint32_t sepbp;
     extern volatile uint32_t *remote_addr, *remote_data, *remote_sts;
-    iprintf("sepbd: blackbird kickstart (noreturn semantics) r0=sepb(%x)\n", sepbp);
+    iprintf("sepbd: kickstart r0=sepb(%x), then TXM handshake\n", sepbp);
     *remote_addr = 0;
     *remote_data = sepbp;
     *remote_sts = 3;
     __asm__ volatile("dsb sy");
     __asm__ volatile("isb");
-    // give SEOS its boot second, then return to the shell (probe via sepbd_disc)
+    spin(24000 * 20);                                  // let TXM reach its poll
+
+    // Drive the TXM handshake state machine in the XNU order (xnu_side.md
+    // table A): the machine advances 0->1->3->7->... one frame at a time and
+    // every request has a defined reply in _bootAction. The old single op-6
+    // send skipped the whole sequence and left it waiting. Order matters.
+    struct bootframe { uint8_t ep, tag, op, param; uint32_t data; const char *name; };
+    static const struct bootframe seq[] = {
+        {0x00, 1, 0x02, 0x00, 0, "A1 status"},
+        {0x00, 1, 0x05, 0x00, 0, "A2 BootSEP"},
+        {0x00, 1, 0x03, 0x00, 0, "A4 nonce req"},
+        {0x00, 1, 0x04, 0x00, 0, "A5 nonce w0"},
+        {0x00, 1, 0x04, 0x01, 0, "A5 nonce w1"},
+        {0x00, 1, 0x04, 0x02, 0, "A5 nonce w2"},
+        {0x00, 1, 0x04, 0x03, 0, "A5 nonce w3"},
+        {0x00, 1, 0x04, 0x04, 0, "A5 nonce w4"},
+        {0x00, 1, 0x02, 0x00, 0, "A8 status ck"},
+        {0x00, 1, 0x02, 0x00, 0, "A8 status ck2"},
+        {0x00, 1, 0x07, 0x00, 0, "A13 shmbuf"},
+    };
+    for (unsigned k = 0; k < sizeof seq / sizeof seq[0]; k++) {
+        iprintf("sepbd: boot %s {ep=%x op=%x p=%x}\n", seq[k].name, seq[k].ep, seq[k].op, seq[k].param);
+        sep_send_msg(seq[k].ep, seq[k].tag, seq[k].op, seq[k].param, seq[k].data);
+        int got = 0;
+        for (int i = 0; i < 100 && !got; i++) {
+            spin(24000);
+            uint64_t r = sep_fast_check_mailbox();
+            if (r) {
+                union sepbd_msg_u m = {.val = r};
+                iprintf("sepbd:   reply ep=%x op=%x data=%x (%d ms)\n",
+                        m.msg.ep, m.msg.opcode, m.msg.data, i);
+                got = 1;
+            }
+        }
+        if (!got) iprintf("sepbd:   (no reply, continuing)\n");
+    }
+    iprintf("sepbd: A9 Boot {op=6 data=%x}\n", (uint32_t)(phys >> 12));
+    sep_send_msg(0x00, 1, 0x06, 0, (uint32_t)(phys >> 12));
+    for (int i = 0; i < 100; i++) { spin(24000); uint64_t r = sep_fast_check_mailbox();
+        if (r) { union sepbd_msg_u m = {.val = r};
+            iprintf("sepbd:   A9 reply ep=%x op=%x\n", m.msg.ep, m.msg.opcode); break; } }
+    iprintf("sepbd: A10 Resume {op=8}\n");
+    sep_send_msg(0x00, 1, 0x08, 0, 0);
     spin(24000 * 100);
-    iprintf("sepbd: kickstart issued (try 'sepbd_disc kick' / 'sepbd_disc listen')\n");
+    iprintf("sepbd: boot sequence complete (try 'sepbd_disc listen 3000')\n");
 }
 
 // ─── ping: request frame via blackbird, kick via mailbox, read reply ───
