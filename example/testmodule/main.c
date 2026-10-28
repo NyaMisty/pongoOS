@@ -904,16 +904,24 @@ static void sepbd_disc_cmd(const char *cmd, char *args) {
         return;
     }
     if (args && args[0]=='k') {                       // kick: elicit advertise
-        iprintf("sepbd: [disc] kick: sending {ep=FD, op=0x2F} ...\n");
+        // the resident sep_irq task races us for every frame (it drains the
+        // slot within microseconds of the interrupt; ep 0xFD falls through
+        // its dispatcher and is dropped silently). hold interrupts for the
+        // whole window — same discipline pongo's seprom_* helpers use.
+        iprintf("sepbd: [disc] kick: sending {ep=FD, op=0x2F} (irqs held)...\n");
+        extern void disable_interrupts(void);
+        extern void enable_interrupts(void);
+        disable_interrupts();
         sep_send_msg(SEPBD_DISC_EP, 0x00, 0x2F, 0x00, 0);
         int got = 0;
         for (int i = 0; i < 300; i++) {               // 3s
             spin(24000);
             uint64_t r = sep_fast_check_mailbox();
-            if (r) { got += sepbd_disc_note(r); }
-            if (got) { iprintf("sepbd: [disc] kick: advertise received (round trip OK)\n"); return; }
+            if (r) { got += sepbd_disc_note(r); if (got) break; }
         }
-        iprintf("sepbd: [disc] kick: no advertise (SEOS down or shape wrong)\n");
+        enable_interrupts();
+        if (got) iprintf("sepbd: [disc] kick: advertise received (round trip OK)\n");
+        else     iprintf("sepbd: [disc] kick: no advertise (SEOS down or shape wrong)\n");
         return;
     }
     if (args && args[0]=='p') {                       // probe <ep>
@@ -935,16 +943,20 @@ static void sepbd_disc_cmd(const char *cmd, char *args) {
         iprintf("sepbd: [disc] no reply from ep %x\n", ep);
         return;
     }
-    // default: listen [ms]
+    // default: listen [ms] — interrupts held so the irq task cannot steal
+    extern void disable_interrupts(void);
+    extern void enable_interrupts(void);
     int ms = 2000;
     if (args && args[0]=='l') { char *sp = strchr(args, ' '); if (sp) ms = (int)strtoul(sp + 1, NULL, 0); }
-    iprintf("sepbd: [disc] listening %d ms...\n", ms);
+    iprintf("sepbd: [disc] listening %d ms (irqs held)...\n", ms);
     int got = 0;
+    disable_interrupts();
     for (int i = 0; i < ms; i++) {
         spin(24000);
         uint64_t r = sep_fast_check_mailbox();
         if (r) got += sepbd_disc_note(r);
     }
+    enable_interrupts();
     iprintf("sepbd: [disc] captured %d frame(s), table has %u entr(y|ies)\n",
             got, sepbd_disc_n);
 }
